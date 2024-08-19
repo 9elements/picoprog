@@ -1,0 +1,35 @@
+[package]
+name = "picoprog"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Marvin Drees <marvin.drees@9elements.com>"]
+resolver = "2"
+
+[dependencies]
+assign-resources = "0.4.1"
+cortex-m = { version = "0.7.7", features = ["inline-asm", "critical-section"] }
+cortex-m-rt = "0.7.3"
+embassy-executor = { version = "0.6.0", features = ["task-arena-size-32768", "arch-cortex-m", "executor-thread", "executor-interrupt", "integrated-timers", "nightly"] }
+embassy-futures = "0.1.1"
+embassy-rp = { version = "0.2.0", features = ["unstable-pac", "time-driver", "critical-section-impl", "rom-func-cache", "rom-v2-intrinsics", "rp2040"] }
+embassy-usb = "0.3.0"
+embassy-usb-logger = "0.2.0"
+futures = { version = "0.3.30", default-features = false, features = ["async-await", "cfg-target-has-atomic", "unstable"] }
+log = "0.4.22"
+portable-atomic = { version = "1.6.0", features = ["critical-section"] }
+static_cell = "2.1.0"
+
+[patch.crates-io]
+embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "7a26e117ccd5f8669548cc8c2424be4691c1c402" }
+embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "7a26e117ccd5f8669548cc8c2424be4691c1c402" }
+embassy-rp = { git = "https://github.com/embassy-rs/embassy", rev = "7a26e117ccd5f8669548cc8c2424be4691c1c402" }
+embassy-usb = { git = "https://github.com/embassy-rs/embassy", rev = "7a26e117ccd5f8669548cc8c2424be4691c1c402" }
+embassy-usb-logger = { git = "https://github.com/embassy-rs/embassy", rev = "7a26e117ccd5f8669548cc8c2424be4691c1c402" }
+
+[profile.release]
+debug = true
+incremental = false
+codegen-units = 1
+opt-level = "s"
+lto = "fat"

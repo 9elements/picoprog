@@ -127,10 +127,10 @@ async fn main(spawner: Spawner) {
     let driver = Driver::new(p.USB, UsbIrqs);
 
     let config = {
-        let mut config = UsbConfig::new(0xc0de, 0xcafe);
+        let mut config = UsbConfig::new(0x1ced, 0xc0fe);
         config.manufacturer = Some("9elements");
         config.product = Some("Picoprog");
-        config.serial_number = Some("00001337");
+        config.serial_number = Some("OSFC2024");
         config.max_power = 100;
         config.max_packet_size_0 = 64;
 

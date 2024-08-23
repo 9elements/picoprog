@@ -45,6 +45,7 @@ assign_resources! {
         miso: PIN_4,
         miso_dma: DMA_CH3,
         cs: PIN_5,
+        led: PIN_25,
     }
 }
 
@@ -266,13 +267,17 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
         config,
     );
     let mut cs = Output::new(r.cs, Level::Low);
+    let mut led = Output::new(r.led, Level::Low);
     let mut buf = [0; 64];
 
     loop {
         class.wait_connection().await;
-        if let Err(e) = class.read_packet(&mut buf).await {
-            log::error!("Error reading packet: {:?}", e);
-            continue;
+        match class.read_packet(&mut buf).await {
+            Ok(_) => led.set_high(),
+            Err(e) => {
+                log::error!("Error reading packet: {:?}", e);
+                continue;
+            }
         }
         match SerprogCommand::from(buf[0]) {
             SerprogCommand::Nop => {
@@ -360,6 +365,7 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                 }
             }
         }
+        led.set_low();
     }
 }
 

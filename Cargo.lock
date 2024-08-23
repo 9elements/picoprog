@@ -919,6 +919,7 @@ dependencies = [
  "embassy-executor",
  "embassy-futures",
  "embassy-rp",
+ "embassy-time",
  "embassy-usb",
  "embassy-usb-logger",
  "futures",

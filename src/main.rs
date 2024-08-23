@@ -19,7 +19,6 @@ use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::{Config as UsbConfig, UsbDevice};
 use embassy_usb_logger::with_class;
-use log::*;
 use static_cell::StaticCell;
 
 bind_interrupts!(struct UartIrqs {
@@ -261,18 +260,18 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
     loop {
         class.wait_connection().await;
         if let Err(e) = class.read_packet(&mut buf).await {
-            error!("Error reading packet: {:?}", e);
+            log::error!("Error reading packet: {:?}", e);
             continue;
         }
         match SerprogCommand::from(buf[0]) {
             SerprogCommand::Nop => {
                 if let Err(e) = class.write_packet(&[S_ACK]).await {
-                    error!("Error writing packet: {:?}", e);
+                    log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::QIface => {
                 if let Err(e) = class.write_packet(&[S_ACK, 0x01, 0x00]).await {
-                    error!("Error writing packet: {:?}", e);
+                    log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::QCmdMap => {
@@ -287,7 +286,7 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                     ])
                     .await
                 {
-                    error!("Error writing packet: {:?}", e);
+                    log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::QPgmName => {
@@ -295,32 +294,32 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                     .write_packet(&[S_ACK, b'P', b'i', b'c', b'o', b'p', b'r', b'o', b'g'])
                     .await
                 {
-                    error!("Error writing packet: {:?}", e);
+                    log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::QSerBuf => {
                 if let Err(e) = class.write_packet(&[S_ACK, 0xFF, 0xFF]).await {
-                    error!("Error writing packet: {:?}", e);
+                    log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::QBustype => {
                 if let Err(e) = class.write_packet(&[S_ACK, 0x08]).await {
-                    error!("Error writing packet: {:?}", e);
+                    log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::SyncNop => {
                 if let Err(e) = class.write_packet(&[S_NAK, S_ACK]).await {
-                    error!("Error writing packet: {:?}", e);
+                    log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::SBustype => {
                 if buf[1] == 0x08 {
                     if let Err(e) = class.write_packet(&[S_ACK]).await {
-                        error!("Error writing packet: {:?}", e);
+                        log::error!("Error writing packet: {:?}", e);
                     }
                 } else {
                     if let Err(e) = class.write_packet(&[S_NAK]).await {
-                        error!("Error writing packet: {:?}", e);
+                        log::error!("Error writing packet: {:?}", e);
                     }
                 }
             }
@@ -331,7 +330,7 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                 let freq = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]);
                 spi.set_frequency(freq);
                 if let Err(e) = class.write_packet(&[S_ACK]).await {
-                    error!("Error writing packet: {:?}", e);
+                    log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::SSpiCs => {
@@ -341,12 +340,12 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                     cs.set_high();
                 }
                 if let Err(e) = class.write_packet(&[S_ACK]).await {
-                    error!("Error writing packet: {:?}", e);
+                    log::error!("Error writing packet: {:?}", e);
                 }
             }
             _ => {
                 if let Err(e) = class.write_packet(&[S_NAK]).await {
-                    error!("Error writing packet: {:?}", e);
+                    log::error!("Error writing packet: {:?}", e);
                 }
             }
         }

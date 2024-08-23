@@ -14,8 +14,8 @@ use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{self, UART0, USB};
 use embassy_rp::spi::{Config as SpiConfig, Spi};
-use embassy_rp::uart::{BufferedInterruptHandler, BufferedUart, Config as UartConfig};
-use embassy_rp::usb::{Driver, InterruptHandler};
+use embassy_rp::uart::{Config as UartConfig, InterruptHandler as UARTInterruptHandler, Uart};
+use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::{Config as UsbConfig, UsbDevice};
 use embassy_usb_logger::with_class;
@@ -23,18 +23,20 @@ use log::*;
 use static_cell::StaticCell;
 
 bind_interrupts!(struct UartIrqs {
-    UART0_IRQ => BufferedInterruptHandler<UART0>;
+    UART0_IRQ => UARTInterruptHandler<UART0>;
 });
 
 bind_interrupts!(struct UsbIrqs {
-    USBCTRL_IRQ => InterruptHandler<USB>;
+    USBCTRL_IRQ => USBInterruptHandler<USB>;
 });
 
 assign_resources! {
     uart: UartResources{
         peripheral: UART0,
         tx: PIN_0,
+        tx_dma: DMA_CH0,
         rx: PIN_1,
+        rx_dma: DMA_CH1,
     }
     spi: SpiResources{
         peripheral: SPI0,
@@ -182,6 +184,10 @@ async fn main(spawner: Spawner) {
     spawner.spawn(logger_task(logger_class)).unwrap();
     spawner.spawn(uart_task(uart_class, r.uart)).unwrap();
     spawner.spawn(serprog_task(serprog_class, r.spi)).unwrap();
+
+    loop {
+        embassy_time::Timer::after(embassy_time::Duration::from_secs(1)).await;
+    }
 }
 
 type CustomUsbDriver = Driver<'static, USB>;
@@ -201,26 +207,30 @@ async fn logger_task(class: CdcAcmClass<'static, CustomUsbDriver>) -> () {
 async fn uart_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: UartResources) -> () {
     let config = UartConfig::default(); // TODO: make this configurable
 
-    static TX_BUF: StaticCell<[u8; 16]> = StaticCell::new();
-    let tx_buf = &mut TX_BUF.init([0; 16])[..];
-    let mut usb_tx_buf = [0; 31];
-
-    static RX_BUF: StaticCell<[u8; 16]> = StaticCell::new();
-    let rx_buf = &mut RX_BUF.init([0; 16])[..];
-    let mut usb_rx_buf = [0; 31];
-
-    let uart = BufferedUart::new(r.peripheral, UartIrqs, r.tx, r.rx, tx_buf, rx_buf, config);
+    let uart = Uart::new(
+        r.peripheral,
+        r.tx,
+        r.rx,
+        UartIrqs,
+        r.tx_dma,
+        r.rx_dma,
+        config,
+    );
     let (mut tx, mut rx) = uart.split();
     let (mut sender, mut receiver) = class.split();
+    let mut usb_tx_buf = [0; 64];
+    // TODO: rx.read always reads len(buf) so having a large buffer here causes issues
+    // But a too small buffer (e.g. 1 here) might cause other unknown issues
+    let mut usb_rx_buf = [0; 1];
 
     let tx_future = async {
         loop {
             receiver.wait_connection().await;
             if let Err(e) = receiver.read_packet(&mut usb_tx_buf).await {
-                error!("Error reading packet: {:?}", e);
+                log::error!("Error reading packet: {:?}", e);
             }
-            if let Err(e) = tx.blocking_write(&usb_tx_buf) {
-                error!("Error writing to UART: {:?}", e);
+            if let Err(e) = tx.write(&usb_tx_buf).await {
+                log::error!("Error writing to UART: {:?}", e);
             }
         }
     };
@@ -228,11 +238,11 @@ async fn uart_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: UartResource
     let rx_future = async {
         loop {
             sender.wait_connection().await;
-            if let Err(e) = rx.blocking_read(&mut usb_rx_buf) {
-                error!("Error reading from UART: {:?}", e);
+            if let Err(e) = rx.read(&mut usb_rx_buf).await {
+                log::error!("Error reading from UART: {:?}", e);
             }
             if let Err(e) = sender.write_packet(&usb_rx_buf).await {
-                error!("Error writing packet: {:?}", e);
+                log::error!("Error writing packet: {:?}", e);
             }
         }
     };

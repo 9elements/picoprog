@@ -41,7 +41,9 @@ assign_resources! {
         peripheral: SPI0,
         clk: PIN_2,
         mosi: PIN_3,
+        mosi_dma: DMA_CH2,
         miso: PIN_4,
+        miso_dma: DMA_CH3,
         cs: PIN_5,
     }
 }
@@ -251,11 +253,20 @@ async fn uart_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: UartResource
 
 #[embassy_executor::task]
 async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiResources) -> ! {
-    let config = SpiConfig::default(); // TODO: make this configurable
+    let mut config = SpiConfig::default(); // TODO: make this configurable
+    config.frequency = 12_000_000; // 12 MHz
 
-    let mut spi = Spi::new_blocking(r.peripheral, r.clk, r.mosi, r.miso, config);
+    let mut spi = Spi::new(
+        r.peripheral,
+        r.clk,
+        r.mosi,
+        r.miso,
+        r.mosi_dma,
+        r.miso_dma,
+        config,
+    );
     let mut cs = Output::new(r.cs, Level::Low);
-    let mut buf = [0; 127];
+    let mut buf = [0; 64];
 
     loop {
         class.wait_connection().await;

@@ -278,63 +278,32 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
         }
         match SerprogCommand::from(buf[0]) {
             SerprogCommand::Nop => {
-                log::info!("Received Nop CMD");
+                log::debug!("Received Nop CMD");
                 if let Err(e) = class.write_packet(&[S_ACK]).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::QIface => {
-                log::info!("Received QIface CMD");
+                log::debug!("Received QIface CMD");
                 if let Err(e) = class.write_packet(&[S_ACK, 0x01, 0x00]).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::QCmdMap => {
-                log::info!("Received QCmdMap CMD");
+                log::debug!("Received QCmdMap CMD");
                 let cmdmap_bytes = CMDMAP.to_le_bytes();
-                if let Err(e) = class
-                    .write_packet(&[
-                        S_ACK,
-                        cmdmap_bytes[0],
-                        cmdmap_bytes[1],
-                        cmdmap_bytes[2],
-                        cmdmap_bytes[3],
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                    ])
-                    .await
-                {
+                let mut packet = [0; 32];
+                packet[0] = S_ACK;
+                packet[1] = cmdmap_bytes[0];
+                packet[2] = cmdmap_bytes[1];
+                packet[3] = cmdmap_bytes[2];
+                packet[4] = cmdmap_bytes[3];
+                if let Err(e) = class.write_packet(&packet).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::QPgmName => {
-                log::info!("Received QPgmName CMD");
+                log::debug!("Received QPgmName CMD");
                 if let Err(e) = class
                     .write_packet(&[
                         S_ACK, b'P', b'i', b'c', b'o', b'p', b'r', b'o', b'g', 0, 0, 0, 0, 0, 0, 0,
@@ -346,74 +315,71 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                 }
             }
             SerprogCommand::QSerBuf => {
-                log::info!("Received QSerBuf CMD");
+                log::debug!("Received QSerBuf CMD");
                 if let Err(e) = class.write_packet(&[S_ACK, 0xFF, 0xFF]).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::QBustype => {
-                log::info!("Received QBustype CMD");
+                log::debug!("Received QBustype CMD");
                 if let Err(e) = class.write_packet(&[S_ACK, 0x08]).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::SyncNop => {
-                log::info!("Received SyncNop CMD");
+                log::debug!("Received SyncNop CMD");
                 if let Err(e) = class.write_packet(&[S_NAK, S_ACK]).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::SBustype => {
-                log::info!("Received SBustype CMD");
+                log::debug!("Received SBustype CMD");
                 if let Err(e) = class.read_packet(&mut buf).await {
                     log::error!("Error reading packet: {:?}", e);
                     continue;
                 }
                 if buf[0] == 0x08 {
-                    log::info!("Received SBustype 'SPI'");
+                    log::debug!("Received SBustype 'SPI'");
                     if let Err(e) = class.write_packet(&[S_ACK]).await {
                         log::error!("Error writing packet: {:?}", e);
                     }
                 } else {
+                    log::debug!("Received unknown SBustype");
                     if let Err(e) = class.write_packet(&[S_NAK]).await {
                         log::error!("Error writing packet: {:?}", e);
                     }
                 }
             }
             SerprogCommand::OSpiOp => {
-                log::info!("Received OSpiOp CMD");
+                log::debug!("Received OSpiOp CMD");
                 if let Err(e) = class.read_packet(&mut buf).await {
                     log::error!("Error reading packet: {:?}", e);
                     continue;
                 }
                 let op_slen = u32::from_le_bytes([buf[0], buf[1], buf[2], 0]);
                 let op_rlen = u32::from_le_bytes([buf[3], buf[4], buf[5], 0]);
-                log::info!("op_slen: {}, op_rlen: {}, buf: {:?}", op_slen, op_rlen, buf);
 
                 const MAX_BUFFER_SIZE: usize = 256;
                 let mut sdata = [0_u8; MAX_BUFFER_SIZE];
                 let mut rdata = [0_u8; MAX_BUFFER_SIZE];
 
-                // Copy initial chunk from buf starting at byte position 7
+                // Copy initial chunk from buf starting at byte position 6 (sdata)
                 let initial_chunk_size = core::cmp::min(64 - 6, op_slen as usize);
                 sdata[..initial_chunk_size].copy_from_slice(&buf[6..6 + initial_chunk_size]);
                 let mut bytes_read = initial_chunk_size;
-                log::info!("Initial chunk copied, bytes_read: {}", bytes_read);
 
                 // Read the remaining sdata in chunks
                 while bytes_read < op_slen as usize {
                     let chunk_size = core::cmp::min(64, op_slen as usize - bytes_read);
-                    log::info!("Reading chunk, chunk_size: {}", chunk_size);
                     if let Err(e) = class.read_packet(&mut buf[..chunk_size]).await {
                         log::error!("Error reading packet: {:?}", e);
                         continue;
                     }
                     sdata[bytes_read..bytes_read + chunk_size].copy_from_slice(&buf[..chunk_size]);
                     bytes_read += chunk_size;
-                    log::info!("Chunk read, total bytes_read: {}", bytes_read);
                 }
 
-                log::info!(
+                log::debug!(
                     "Starting SPI transfer, sdata: {:?}, rdata: {:?}",
                     &sdata[..op_slen as usize],
                     &rdata[..op_rlen as usize]
@@ -423,9 +389,9 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                     .await
                 {
                     Ok(_) => {
-                        log::info!("SPI transfer successful");
-                        log::info!("Sent data (sdata): {:?}", &sdata[..op_slen as usize]);
-                        log::info!("Received data (rdata): {:?}", &rdata[..op_rlen as usize]);
+                        log::debug!("SPI transfer successful");
+                        log::debug!("Sent data (sdata): {:?}", &sdata[..op_slen as usize]);
+                        log::debug!("Received data (rdata): {:?}", &rdata[..op_rlen as usize]);
                         if let Err(e) = class.write_packet(&[S_ACK]).await {
                             log::error!("Error writing packet: {:?}", e);
                         }
@@ -433,7 +399,6 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                         let mut bytes_written = 0;
                         while bytes_written < op_rlen as usize {
                             let chunk_size = core::cmp::min(64, op_rlen as usize - bytes_written);
-                            log::info!("Writing chunk, chunk_size: {}", chunk_size);
                             if let Err(e) = class
                                 .write_packet(&rdata[bytes_written..bytes_written + chunk_size])
                                 .await
@@ -441,7 +406,6 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                                 log::error!("Error writing rdata: {:?}", e);
                             }
                             bytes_written += chunk_size;
-                            log::info!("Chunk written, total bytes_written: {}", bytes_written);
                         }
                     }
                     Err(e) => {
@@ -451,16 +415,14 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                         }
                     }
                 }
-                // Timeout for printing the log messages
-                embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await;
             }
             SerprogCommand::SSpiFreq => {
-                log::info!("Received SSpiFreq CMD");
+                log::debug!("Received SSpiFreq CMD");
                 if let Err(e) = class.read_packet(&mut buf).await {
                     log::error!("Error reading packet: {:?}", e);
                     continue;
                 }
-                log::info!("Received SSpiFreq packet: {:?}", buf);
+                log::debug!("Received SSpiFreq packet: {:?}", buf);
                 let freq = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
                 spi.set_frequency(freq);
                 if let Err(e) = class.write_packet(&[S_ACK]).await {
@@ -468,7 +430,8 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                 }
             }
             SerprogCommand::SPinState => {
-                log::info!("Received SPinState CMD");
+                // This command should set SPI pins to active but we just use it to toggle the LED
+                log::debug!("Received SPinState CMD");
                 if let Err(e) = class.read_packet(&mut buf).await {
                     log::error!("Error reading packet: {:?}", e);
                     continue;
@@ -483,7 +446,7 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                 }
             }
             SerprogCommand::SSpiCs => {
-                log::info!("Received SSpiCs CMD");
+                log::debug!("Received SSpiCs CMD");
                 if let Err(e) = class.read_packet(&mut buf).await {
                     log::error!("Error reading packet: {:?}", e);
                     continue;
@@ -498,7 +461,7 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                 }
             }
             _ => {
-                log::info!("Received unknown CMD");
+                log::debug!("Received unknown CMD");
                 if let Err(e) = class.write_packet(&[S_NAK]).await {
                     log::error!("Error writing packet: {:?}", e);
                 }

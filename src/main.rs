@@ -386,8 +386,8 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                     log::error!("Error reading packet: {:?}", e);
                     continue;
                 }
-                let op_slen = u32::from_le_bytes([buf[3], buf[2], buf[1], 0]);
-                let op_rlen = u32::from_le_bytes([buf[6], buf[5], buf[4], 0]);
+                let op_slen = u32::from_le_bytes([buf[0], buf[1], buf[2], 0]);
+                let op_rlen = u32::from_le_bytes([buf[3], buf[4], buf[5], 0]);
                 log::info!("op_slen: {}, op_rlen: {}, buf: {:?}", op_slen, op_rlen, buf);
 
                 const MAX_BUFFER_SIZE: usize = 256;
@@ -395,8 +395,8 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                 let mut rdata = [0_u8; MAX_BUFFER_SIZE];
 
                 // Copy initial chunk from buf starting at byte position 7
-                let initial_chunk_size = core::cmp::min(64 - 7, op_slen as usize);
-                sdata[..initial_chunk_size].copy_from_slice(&buf[7..7 + initial_chunk_size]);
+                let initial_chunk_size = core::cmp::min(64 - 6, op_slen as usize);
+                sdata[..initial_chunk_size].copy_from_slice(&buf[6..6 + initial_chunk_size]);
                 let mut bytes_read = initial_chunk_size;
                 log::info!("Initial chunk copied, bytes_read: {}", bytes_read);
 

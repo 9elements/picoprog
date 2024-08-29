@@ -469,9 +469,20 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                     continue;
                 }
                 log::debug!("Received SSpiFreq packet: {:?}", buf);
-                let freq = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-                spi.set_frequency(freq);
-                if let Err(e) = class.write_packet(&[S_ACK]).await {
+                let try_freq = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                log::debug!("Setting SPI frequency: {:?}", try_freq);
+                spi.set_frequency(try_freq);
+                let actual_freq = try_freq.to_le_bytes(); // TODO can we report what the hardware has set up?
+                if let Err(e) = class
+                    .write_packet(&[
+                        S_ACK,
+                        actual_freq[0],
+                        actual_freq[1],
+                        actual_freq[2],
+                        actual_freq[3],
+                    ])
+                    .await
+                {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }

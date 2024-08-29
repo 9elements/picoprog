@@ -390,32 +390,46 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                     log::error!("Error flushing SPI: {:?}", e);
                 }
 
-                match spi
-                    .transfer(&mut rdata[..op_rlen as usize], &sdata[..op_slen as usize])
-                    .await
-                {
+                match spi.write(&sdata[..op_slen as usize]).await {
                     Ok(_) => {
-                        log::debug!("SPI transfer successful");
+                        log::debug!("SPI write successful");
                         log::debug!("Sent data (sdata): {:?}", &sdata[..op_slen as usize]);
-                        log::debug!("Received data (rdata): {:?}", &rdata[..op_rlen as usize]);
-                        if let Err(e) = class.write_packet(&[S_ACK]).await {
-                            log::error!("Error writing packet: {:?}", e);
-                        }
-                        // Send the full rdata in chunks
-                        let mut bytes_written = 0;
-                        while bytes_written < op_rlen as usize {
-                            let chunk_size = core::cmp::min(64, op_rlen as usize - bytes_written);
-                            if let Err(e) = class
-                                .write_packet(&rdata[bytes_written..bytes_written + chunk_size])
-                                .await
-                            {
-                                log::error!("Error writing rdata: {:?}", e);
+                        match spi.read(&mut rdata[..op_rlen as usize]).await {
+                            Ok(_) => {
+                                log::debug!("SPI read successful");
+                                log::debug!(
+                                    "Received data (rdata): {:?}",
+                                    &rdata[..op_rlen as usize]
+                                );
+                                if let Err(e) = class.write_packet(&[S_ACK]).await {
+                                    log::error!("Error writing packet: {:?}", e);
+                                }
+                                // Send the full rdata in chunks
+                                let mut bytes_written = 0;
+                                while bytes_written < op_rlen as usize {
+                                    let chunk_size =
+                                        core::cmp::min(64, op_rlen as usize - bytes_written);
+                                    if let Err(e) = class
+                                        .write_packet(
+                                            &rdata[bytes_written..bytes_written + chunk_size],
+                                        )
+                                        .await
+                                    {
+                                        log::error!("Error writing rdata: {:?}", e);
+                                    }
+                                    bytes_written += chunk_size;
+                                }
                             }
-                            bytes_written += chunk_size;
+                            Err(e) => {
+                                log::error!("SPI read error: {:?}", e);
+                                if let Err(e) = class.write_packet(&[S_NAK]).await {
+                                    log::error!("Error writing NAK: {:?}", e);
+                                }
+                            }
                         }
                     }
                     Err(e) => {
-                        log::error!("SPI transfer error: {:?}", e);
+                        log::error!("SPI write error: {:?}", e);
                         if let Err(e) = class.write_packet(&[S_NAK]).await {
                             log::error!("Error writing NAK: {:?}", e);
                         }

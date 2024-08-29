@@ -115,8 +115,10 @@ const CMDMAP: u32 = (1 << SerprogCommand::Nop as u32)
     | (1 << SerprogCommand::QCmdMap as u32)
     | (1 << SerprogCommand::QPgmName as u32)
     | (1 << SerprogCommand::QSerBuf as u32)
+    | (1 << SerprogCommand::QWrNMaxLen as u32)
     | (1 << SerprogCommand::QBustype as u32)
     | (1 << SerprogCommand::SyncNop as u32)
+    | (1 << SerprogCommand::QRdNMaxLen as u32)
     | (1 << SerprogCommand::OSpiOp as u32)
     | (1 << SerprogCommand::SBustype as u32)
     | (1 << SerprogCommand::SSpiFreq as u32)
@@ -269,6 +271,8 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
     let mut led = Output::new(r.led, Level::Low);
     let mut buf = [0; 64];
 
+    const MAX_BUFFER_SIZE: usize = 256;
+
     loop {
         class.wait_connection().await;
         if let Err(e) = class.read_packet(&mut buf).await {
@@ -319,6 +323,17 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
+            SerprogCommand::QWrNMaxLen => {
+                log::debug!("Received QRdNMaxLen CMD");
+                let size_24 = MAX_BUFFER_SIZE.to_le_bytes();
+
+                if let Err(e) = class
+                    .write_packet(&[S_ACK, size_24[0], size_24[1], size_24[2]])
+                    .await
+                {
+                    log::error!("Error writing packet: {:?}", e);
+                }
+            }
             SerprogCommand::QBustype => {
                 log::debug!("Received QBustype CMD");
                 if let Err(e) = class.write_packet(&[S_ACK, 0x08]).await {
@@ -328,6 +343,17 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
             SerprogCommand::SyncNop => {
                 log::debug!("Received SyncNop CMD");
                 if let Err(e) = class.write_packet(&[S_NAK, S_ACK]).await {
+                    log::error!("Error writing packet: {:?}", e);
+                }
+            }
+            SerprogCommand::QRdNMaxLen => {
+                log::debug!("Received QRdNMaxLen CMD");
+                let size_24 = MAX_BUFFER_SIZE.to_le_bytes();
+
+                if let Err(e) = class
+                    .write_packet(&[S_ACK, size_24[0], size_24[1], size_24[2]])
+                    .await
+                {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
@@ -358,7 +384,6 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                 let op_slen = u32::from_le_bytes([buf[0], buf[1], buf[2], 0]);
                 let op_rlen = u32::from_le_bytes([buf[3], buf[4], buf[5], 0]);
 
-                const MAX_BUFFER_SIZE: usize = 256;
                 let mut sdata = [0_u8; MAX_BUFFER_SIZE];
                 let mut rdata = [0_u8; MAX_BUFFER_SIZE];
 

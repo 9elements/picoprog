@@ -265,7 +265,7 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
         r.miso_dma,
         config,
     );
-    let mut cs = Output::new(r.cs, Level::Low);
+    let mut cs = Output::new(r.cs, Level::High);
     let mut led = Output::new(r.led, Level::Low);
     let mut buf = [0; 64];
 
@@ -389,6 +389,7 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                     log::error!("Error flushing SPI: {:?}", e);
                 }
 
+                cs.set_low();
                 match spi.write(&sdata[..op_slen as usize]).await {
                     Ok(_) => {
                         log::debug!("SPI write successful");
@@ -434,6 +435,7 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                         }
                     }
                 }
+                cs.set_high();
             }
             SerprogCommand::SSpiFreq => {
                 log::debug!("Received SSpiFreq CMD");

@@ -120,8 +120,7 @@ const CMDMAP: u32 = (1 << SerprogCommand::Nop as u32)
     | (1 << SerprogCommand::OSpiOp as u32)
     | (1 << SerprogCommand::SBustype as u32)
     | (1 << SerprogCommand::SSpiFreq as u32)
-    | (1 << SerprogCommand::SPinState as u32)
-    | (1 << SerprogCommand::SSpiCs as u32);
+    | (1 << SerprogCommand::SPinState as u32);
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -460,21 +459,6 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                     led.set_low();
                 } else {
                     led.set_high();
-                }
-                if let Err(e) = class.write_packet(&[S_ACK]).await {
-                    log::error!("Error writing packet: {:?}", e);
-                }
-            }
-            SerprogCommand::SSpiCs => {
-                log::debug!("Received SSpiCs CMD");
-                if let Err(e) = class.read_packet(&mut buf).await {
-                    log::error!("Error reading packet: {:?}", e);
-                    continue;
-                }
-                if buf[0] == 0 || buf[0] == 1 {
-                    cs.set_low();
-                } else {
-                    cs.set_high();
                 }
                 if let Err(e) = class.write_packet(&[S_ACK]).await {
                     log::error!("Error writing packet: {:?}", e);

@@ -292,7 +292,7 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
             SerprogCommand::QCmdMap => {
                 log::debug!("Received QCmdMap CMD");
                 let cmdmap_bytes = CMDMAP.to_le_bytes();
-                let mut packet = [0; 32];
+                let mut packet = [0; 33];
                 packet[0] = S_ACK;
                 packet[1] = cmdmap_bytes[0];
                 packet[2] = cmdmap_bytes[1];
@@ -384,6 +384,12 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                     &sdata[..op_slen as usize],
                     &rdata[..op_rlen as usize]
                 );
+
+                // This call is blocking according to the SPI HAL
+                if let Err(e) = spi.flush() {
+                    log::error!("Error flushing SPI: {:?}", e);
+                }
+
                 match spi
                     .transfer(&mut rdata[..op_rlen as usize], &sdata[..op_slen as usize])
                     .await

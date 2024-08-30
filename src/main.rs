@@ -202,12 +202,12 @@ async fn usb_task(mut usb: CustomUsbDevice) -> ! {
 }
 
 #[embassy_executor::task]
-async fn logger_task(class: CdcAcmClass<'static, CustomUsbDriver>) -> () {
+async fn logger_task(class: CdcAcmClass<'static, CustomUsbDriver>) {
     with_class!(1024, log::LevelFilter::Info, class).await
 }
 
 #[embassy_executor::task]
-async fn uart_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: UartResources) -> () {
+async fn uart_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: UartResources) {
     let config = UartConfig::default(); // TODO: make this configurable
 
     let uart = Uart::new(

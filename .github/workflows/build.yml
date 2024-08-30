@@ -1,0 +1,64 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: --deny warnings
+
+jobs:
+  generate-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      commits: ${{ steps.commits.outputs.hashes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Get all commit hashes
+        id: commits
+        run: |
+          echo "hashes=[$(git log -z --pretty=format:"'%H'," ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} | sed 's/.$//')]" >> "$GITHUB_OUTPUT"
+  build:
+    name: Build
+    needs: generate-matrix
+    strategy:
+      matrix:
+        commit: ${{ fromJson(needs.generate-matrix.outputs.commits) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.commit }}
+      - name: Install toolchain and tools
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
+          sudo apt update && sudo apt install -y libudev-dev
+          cargo install flip-link elf2uf2-rs
+      - name: Build
+        run: cargo run --verbose --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Picoprog-Image-${{ matrix.commit }}
+          path: target/thumbv6m-none-eabi/release/picoprog.uf2

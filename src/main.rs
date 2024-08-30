@@ -271,7 +271,7 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
     let mut led = Output::new(r.led, Level::Low);
     let mut buf = [0; 64];
 
-    const MAX_BUFFER_SIZE: usize = 256;
+    const MAX_BUFFER_SIZE: usize = 2048;
 
     loop {
         class.wait_connection().await;

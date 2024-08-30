@@ -1,0 +1,46 @@
+name: SLSA generic generator
+
+on:
+  workflow_dispatch:
+  release:
+    types:
+      - created
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      digests: ${{ steps.hash.outputs.digests }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain and tools
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
+      - name: Install toolchain and tools
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
+          sudo apt update && sudo apt install -y libudev-dev
+          cargo install flip-link elf2uf2-rs
+      - name: Build
+        run: cargo run --release
+      - name: Generate subject for provenance
+        id: hash
+        run: |
+          set -euo pipefail
+          echo "hashes=$(sha256sum target/thumbv6m-none-eabi/release/picoprog.uf2 | base64 -w0)" >> "${GITHUB_OUTPUT}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Picoprog-Image
+          path: target/thumbv6m-none-eabi/release/picoprog.uf2
+  provenance:
+    needs: build
+    permissions:
+      actions: read # To read the workflow path.
+      id-token: write # To sign the provenance.
+      contents: write # To add assets to a release.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v1.4.0
+    with:
+      base64-subjects: "${{ needs.build.outputs.digests }}"
+      upload-assets: true

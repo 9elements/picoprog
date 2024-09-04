@@ -7,7 +7,7 @@
 
 use assign_resources::assign_resources;
 use core::panic::PanicInfo;
-use cortex_m::asm;
+//use cortex_m::asm;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_rp::bind_interrupts;
@@ -210,6 +210,12 @@ async fn logger_task(class: CdcAcmClass<'static, CustomUsbDriver>) {
 async fn uart_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: UartResources) {
     let config = UartConfig::default(); // TODO: make this configurable
 
+    // TODO: Buffers are weird...
+    let mut usb_tx_buf = [0; 64];
+    let mut usb_rx_buf = [0; 64];
+    let mut uart_tx_buf = [0; 1];
+    let mut uart_rx_buf = [0; 1];
+
     let uart = Uart::new(
         r.peripheral,
         r.tx,
@@ -221,19 +227,33 @@ async fn uart_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: UartResource
     );
     let (mut tx, mut rx) = uart.split();
     let (mut sender, mut receiver) = class.split();
-    let mut usb_tx_buf = [0; 64];
-    // TODO: rx.read always reads len(buf) so having a large buffer here causes issues
-    // But a too small buffer (e.g. 1 here) might cause other unknown issues
-    let mut usb_rx_buf = [0; 1];
 
     let tx_future = async {
         loop {
             receiver.wait_connection().await;
             if let Err(e) = receiver.read_packet(&mut usb_tx_buf).await {
                 log::error!("Error reading packet: {:?}", e);
+                continue;
             }
-            if let Err(e) = tx.write(&usb_tx_buf).await {
-                log::error!("Error writing to UART: {:?}", e);
+            let len = usb_tx_buf.iter().position(|&x| x == 0).unwrap_or(64);
+            let mut offset = 0;
+            while offset < len {
+                let chunk_len = (len - offset).min(1);
+                if let Some(slice) = usb_tx_buf.get(offset..offset + chunk_len) {
+                    uart_tx_buf[..chunk_len].copy_from_slice(slice);
+                    log::debug!(
+                        "USB to UART - USB buffer (len: {}): {:?}, UART buffer (len: {}): {:?}",
+                        slice.len(),
+                        slice,
+                        chunk_len,
+                        &uart_tx_buf[..chunk_len]
+                    );
+                    if let Err(e) = tx.write(&uart_tx_buf[..chunk_len]).await {
+                        log::error!("Error writing to UART: {:?}", e);
+                        break;
+                    }
+                }
+                offset += chunk_len;
             }
         }
     };
@@ -241,11 +261,23 @@ async fn uart_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: UartResource
     let rx_future = async {
         loop {
             sender.wait_connection().await;
-            if let Err(e) = rx.read(&mut usb_rx_buf).await {
+            if let Err(e) = rx.read(&mut uart_rx_buf).await {
                 log::error!("Error reading from UART: {:?}", e);
+                continue;
             }
-            if let Err(e) = sender.write_packet(&usb_rx_buf).await {
-                log::error!("Error writing packet: {:?}", e);
+            let len = uart_rx_buf.iter().position(|&x| x == 0).unwrap_or(1);
+            if let Some(slice) = uart_rx_buf.get(..len) {
+                usb_rx_buf[..len].copy_from_slice(slice);
+                log::debug!(
+                    "UART to USB - UART buffer (len: {}): {:?}, USB buffer (len: {}): {:?}",
+                    slice.len(),
+                    slice,
+                    len,
+                    &usb_rx_buf[..len]
+                );
+                if let Err(e) = sender.write_packet(&usb_rx_buf[..len]).await {
+                    log::error!("Error writing packet: {:?}", e);
+                }
             }
         }
     };
@@ -513,8 +545,10 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    loop {
-        asm::bkpt();
-    }
+fn panic(info: &PanicInfo) -> ! {
+    // Print out the panic info
+    log::error!("Panic occurred: {:?}", info);
+
+    // Reboot the system
+    cortex_m::peripheral::SCB::sys_reset();
 }

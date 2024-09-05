@@ -21,7 +21,7 @@ To compile the firmware, follow these steps:
 1. Clone the repository:
 
 ```sh
-git clone https://github.com/yourusername/picoprog.git
+git clone https://github.com/9elements/picoprog.git
 cd picoprog
 ```
 

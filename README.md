@@ -59,7 +59,7 @@ To communicate with the UART peripheral, open the corresponding serial port (e.g
 
 To interact with the Raspberry Pi Pico for reading and writing SPI flash chips, you can use tools like `flashrom` or `flashprog`. These tools support the `serprog` protocol, which allows communication over a serial interface.
 
-1. Install `flashrom` or `flsahprog` e.g.:
+1. Install `flashrom` or `flashprog` e.g.:
 
 ```sh
 sudo apt-get install flashrom

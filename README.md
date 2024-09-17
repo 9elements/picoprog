@@ -10,7 +10,7 @@ Before you can compile and use Picoprog, you need to install the following depen
 - Install flip-link and elf2uf2
 
 ```sh
-sudo apt install libudev-dev
+sudo apt install build-essential libudev-dev pkg-config
 cargo install flip-link elf2uf2-rs
 ```
 

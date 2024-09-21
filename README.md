@@ -10,7 +10,10 @@ Before you can compile and use Picoprog, you need to install the following depen
 - Install flip-link and elf2uf2
 
 ```sh
+# Only Linux
 sudo apt install build-essential libudev-dev pkg-config
+
+# All systems
 cargo install flip-link elf2uf2-rs
 ```
 
@@ -42,18 +45,22 @@ To flash the firmware onto the Raspberry Pi Pico, follow these steps:
 2. Copy the UF2 file to the Pico:
 
 ```sh
+# Linux
 cp target/thumbv6m-none-eabi/release/picoprog.uf2 /media/$USER/RPI-RP2/
+
+# macOS
+cp target/thumbv6m-none-eabi/release/picoprog.uf2 /Volumes/RPI-RP2/
 ```
 
 3. The Pico will automatically reboot and start running the new firmware.
 
 ## Usage
 
-Once the firmware is running on the Raspberry Pi Pico, you can use any terminal program to communicate with the UART and SPI peripherals via USB. The device will appear as a USB CDC (Communications Device Class) device. Currently `/dev/ttyACM0` is a debug console that prints information about the picos current operation.
+Once the firmware is running on the Raspberry Pi Pico, you can use any terminal program to communicate with the UART and SPI peripherals via USB. The device will appear as a USB CDC (Communications Device Class) device. Currently `/dev/ttyACM0` (macOS: `/dev/tty.usbmodemOSFC20241`) is a debug console that prints information about the picos current operation.
 
 ### UART Communication
 
-To communicate with the UART peripheral, open the corresponding serial port (e.g., `/dev/ttyACM1` on Linux) with your terminal program. For now the Baud is fixed at 115200 but can be changed in code. Dynamic reconfiguration is still planned.
+To communicate with the UART peripheral, open the corresponding serial port (e.g., `/dev/ttyACM1` on Linux, `/dev/tty.usbmodemOSFC20243` on macOS) with your terminal program. For now the Baud is fixed at 115200 but can be changed in code. Dynamic reconfiguration is still planned.
 
 ### Using Flashrom or Flashprog
 
@@ -62,7 +69,11 @@ To interact with the Raspberry Pi Pico for reading and writing SPI flash chips, 
 1. Install `flashrom` or `flashprog` e.g.:
 
 ```sh
+# Debian or Debian-based Linux distributions
 sudo apt-get install flashrom
+
+# macOS with Homebrew
+brew install flashrom
 ```
 
 2. Use the following command to read from the SPI flash chip:
@@ -81,7 +92,7 @@ flashrom -p serprog:dev=/dev/ttyACM2 -w firmware.bin
 
 This command writes the contents of `firmware.bin` to the SPI flash chip.
 
-Make sure to replace `/dev/ttyACM2` with the correct serial port if your device is connected to a different port.
+Make sure to replace `/dev/ttyACM2` with the correct serial port if your device is connected to a different port or if you're on a different operating system (on macOS it will be `/dev/tty.usbmodemOSFC20245`).
 
 
 ## License

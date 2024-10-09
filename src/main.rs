@@ -311,7 +311,7 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
             log::error!("Error reading packet: {:?}", e);
             continue;
         }
-        match SerprogCommand::from(buf[0]) {
+        match SerprogCommand::from(buf.get(0).copied().unwrap_or(0)) {
             SerprogCommand::Nop => {
                 log::debug!("Received Nop CMD");
                 if let Err(e) = class.write_packet(&[S_ACK]).await {
@@ -395,7 +395,7 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                     log::error!("Error reading packet: {:?}", e);
                     continue;
                 }
-                if buf[0] == 0x08 {
+                if buf.get(0).copied().unwrap_or(0) == 0x08 {
                     log::debug!("Received SBustype 'SPI'");
                     if let Err(e) = class.write_packet(&[S_ACK]).await {
                         log::error!("Error writing packet: {:?}", e);
@@ -413,8 +413,18 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
                     log::error!("Error reading packet: {:?}", e);
                     continue;
                 }
-                let op_slen = u32::from_le_bytes([buf[0], buf[1], buf[2], 0]);
-                let op_rlen = u32::from_le_bytes([buf[3], buf[4], buf[5], 0]);
+                let op_slen = u32::from_le_bytes([
+                    buf.get(0).copied().unwrap_or(0),
+                    buf.get(1).copied().unwrap_or(0),
+                    buf.get(2).copied().unwrap_or(0),
+                    0,
+                ]);
+                let op_rlen = u32::from_le_bytes([
+                    buf.get(3).copied().unwrap_or(0),
+                    buf.get(4).copied().unwrap_or(0),
+                    buf.get(5).copied().unwrap_or(0),
+                    0,
+                ]);
 
                 let mut sdata = [0_u8; MAX_BUFFER_SIZE];
                 let mut rdata = [0_u8; MAX_BUFFER_SIZE];

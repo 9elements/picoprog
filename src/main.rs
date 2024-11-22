@@ -7,7 +7,7 @@
 
 use assign_resources::assign_resources;
 use core::panic::PanicInfo;
-//use cortex_m::asm;
+use cortex_m::peripheral::SCB;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_rp::bind_interrupts;
@@ -550,5 +550,5 @@ fn panic(info: &PanicInfo) -> ! {
     log::error!("Panic occurred: {:?}", info);
 
     // Reboot the system
-    cortex_m::peripheral::SCB::sys_reset();
+    SCB::sys_reset();
 }

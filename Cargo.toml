@@ -17,9 +17,11 @@ embassy-time = "0.3.2"
 embassy-usb = { version = "0.3.0", features = ["max-handler-count-6", "max-interface-count-6"] }
 embassy-usb-logger = "0.2.0"
 futures = { version = "0.3.30", default-features = false, features = ["async-await", "cfg-target-has-atomic", "unstable"] }
+heapless = { version = "0.8.0", features = ["portable-atomic-critical-section", "ufmt"] }
 log = "0.4.22"
 portable-atomic = { version = "1.6.0", features = ["critical-section"] }
 static_cell = "2.1.0"
+ufmt = "0.2.0"
 
 [patch.crates-io]
 embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "7a26e117ccd5f8669548cc8c2424be4691c1c402" }

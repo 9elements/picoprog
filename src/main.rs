@@ -11,6 +11,7 @@ use cortex_m::peripheral::SCB;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_rp::bind_interrupts;
+use embassy_rp::flash::{Async, Flash};
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{self, UART0, USB};
 use embassy_rp::spi::{Config as SpiConfig, Spi};
@@ -19,7 +20,9 @@ use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::{Config as UsbConfig, UsbDevice};
 use embassy_usb_logger::with_class;
+use heapless::String;
 use static_cell::StaticCell;
+use ufmt::uwrite;
 
 bind_interrupts!(struct UartIrqs {
     UART0_IRQ => UARTInterruptHandler<UART0>;
@@ -48,6 +51,8 @@ assign_resources! {
         led: PIN_25,
     }
 }
+
+const FLASH_SIZE: usize = 2 * 1024 * 1024;
 
 // According to Serial Flasher Protocol Specification - version 1
 const S_ACK: u8 = 0x06;
@@ -130,11 +135,23 @@ async fn main(spawner: Spawner) {
     let r = split_resources!(p);
     let driver = Driver::new(p.USB, UsbIrqs);
 
+    let mut flash = Flash::<_, Async, FLASH_SIZE>::new(p.FLASH, p.DMA_CH4);
+    let mut uid: [u8; 8] = [0; 8];
+    flash.blocking_unique_id(&mut uid).unwrap_or_default();
+
+    static mut UID_STR: String<16> = String::<16>::new();
+    unsafe {
+        for byte in uid.iter() {
+            uwrite!(UID_STR, "{:02X}", *byte).unwrap_or_default();
+        }
+    }
+    let uid_str = unsafe { UID_STR.as_str() };
+
     let config = {
         let mut config = UsbConfig::new(0x1ced, 0xc0fe);
         config.manufacturer = Some("9elements");
         config.product = Some("Picoprog");
-        config.serial_number = Some("OSFC2024");
+        config.serial_number = Some(uid_str);
         config.max_power = 100;
         config.max_packet_size_0 = 64;
 

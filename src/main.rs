@@ -13,32 +13,31 @@ use embassy_futures::join::join;
 use embassy_rp::bind_interrupts;
 use embassy_rp::flash::{Async, Flash};
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::peripherals::{self, UART0, USB};
+use embassy_rp::peripherals::{self, PIO0, USB};
+use embassy_rp::pio::{Instance as PioInstance, InterruptHandler as PIOInterruptHandler, Pio};
+use embassy_rp::pio_programs::uart::{PioUartRx, PioUartRxProgram, PioUartTx, PioUartTxProgram};
 use embassy_rp::spi::{Config as SpiConfig, Spi};
-use embassy_rp::uart::{Config as UartConfig, InterruptHandler as UARTInterruptHandler, Uart};
-use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
-use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
+use embassy_rp::usb::{Driver, Instance as UsbInstance, InterruptHandler as USBInterruptHandler};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::pipe::{Pipe, Reader, Writer};
+use embassy_usb::class::cdc_acm::{CdcAcmClass, Receiver, Sender, State};
+use embassy_usb::driver::EndpointError;
 use embassy_usb::{Config as UsbConfig, UsbDevice};
 use embassy_usb_logger::with_class;
 use heapless::String;
 use static_cell::StaticCell;
 use ufmt::uwrite;
 
-bind_interrupts!(struct UartIrqs {
-    UART0_IRQ => UARTInterruptHandler<UART0>;
-});
-
-bind_interrupts!(struct UsbIrqs {
+bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => USBInterruptHandler<USB>;
+    PIO0_IRQ_0 => PIOInterruptHandler<PIO0>;
 });
 
 assign_resources! {
     uart: UartResources{
-        peripheral: UART0,
+        peripheral: PIO0,
         tx: PIN_0,
-        tx_dma: DMA_CH0,
         rx: PIN_1,
-        rx_dma: DMA_CH1,
     }
     spi: SpiResources{
         peripheral: SPI0,
@@ -133,7 +132,7 @@ const CMDMAP: u32 = (1 << SerprogCommand::Nop as u32)
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     let r = split_resources!(p);
-    let driver = Driver::new(p.USB, UsbIrqs);
+    let driver = Driver::new(p.USB, Irqs);
 
     let mut flash = Flash::<_, Async, FLASH_SIZE>::new(p.FLASH, p.DMA_CH4);
     let mut uid: [u8; 8] = [0; 8];
@@ -211,6 +210,17 @@ async fn main(spawner: Spawner) {
 type CustomUsbDriver = Driver<'static, USB>;
 type CustomUsbDevice = UsbDevice<'static, CustomUsbDriver>;
 
+struct Disconnected {}
+
+impl From<EndpointError> for Disconnected {
+    fn from(val: EndpointError) -> Self {
+        match val {
+            EndpointError::BufferOverflow => panic!("USB buffer overflow"),
+            EndpointError::Disabled => Disconnected {},
+        }
+    }
+}
+
 #[embassy_executor::task]
 async fn usb_task(mut usb: CustomUsbDevice) -> ! {
     usb.run().await
@@ -223,86 +233,112 @@ async fn logger_task(class: CdcAcmClass<'static, CustomUsbDriver>) {
 
 #[embassy_executor::task]
 async fn uart_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: UartResources) {
-    let config = UartConfig::default(); // TODO: make this configurable
+    let Pio {
+        mut common,
+        sm0,
+        sm1,
+        ..
+    } = Pio::new(r.peripheral, Irqs);
 
-    // TODO: Buffers are weird...
-    let mut usb_tx_buf = [0; 64];
-    let mut usb_rx_buf = [0; 64];
-    let mut uart_tx_buf = [0; 1];
-    let mut uart_rx_buf = [0; 1];
+    let tx_prog = PioUartTxProgram::new(&mut common);
+    let mut uart_tx = PioUartTx::new(115200, &mut common, sm0, r.tx, &tx_prog);
 
-    let uart = Uart::new(
-        r.peripheral,
-        r.tx,
-        r.rx,
-        UartIrqs,
-        r.tx_dma,
-        r.rx_dma,
-        config,
+    let rx_prog = PioUartRxProgram::new(&mut common);
+    let mut uart_rx = PioUartRx::new(115200, &mut common, sm1, r.rx, &rx_prog);
+
+    let mut usb_pipe: Pipe<NoopRawMutex, 64> = Pipe::new();
+    let (mut usb_pipe_reader, mut usb_pipe_writer) = usb_pipe.split();
+
+    let mut uart_pipe: Pipe<NoopRawMutex, 64> = Pipe::new();
+    let (mut uart_pipe_reader, mut uart_pipe_writer) = uart_pipe.split();
+
+    let (mut usb_tx, mut usb_rx) = class.split();
+
+    // Read + write from USB
+    let usb_future = async {
+        loop {
+            log::debug!("[UART]: Wait for USB connection");
+            usb_rx.wait_connection().await;
+            log::debug!("[UART]: USB Connected");
+            let _baud = usb_rx.line_coding().data_rate(); // TODO: Make use of this in the PIO program
+            let _ = join(
+                usb_read(&mut usb_rx, &mut uart_pipe_writer),
+                usb_write(&mut usb_tx, &mut usb_pipe_reader),
+            )
+            .await;
+            log::debug!("[UART]: USB Disconnected");
+        }
+    };
+
+    // Read + write from UART
+    let uart_future = join(
+        uart_read(&mut uart_rx, &mut usb_pipe_writer),
+        uart_write(&mut uart_tx, &mut uart_pipe_reader),
     );
-    let (mut tx, mut rx) = uart.split();
-    let (mut sender, mut receiver) = class.split();
 
-    let tx_future = async {
-        loop {
-            receiver.wait_connection().await;
-            if let Err(e) = receiver.read_packet(&mut usb_tx_buf).await {
-                log::error!("Error reading packet: {:?}", e);
-                continue;
-            }
-            let len = usb_tx_buf.iter().position(|&x| x == 0).unwrap_or(64);
-            let mut offset = 0;
-            while offset < len {
-                let chunk_len = (len - offset).min(1);
-                if let Some(slice) = usb_tx_buf.get(offset..offset + chunk_len) {
-                    uart_tx_buf[..chunk_len].copy_from_slice(slice);
-                    log::debug!(
-                        "USB to UART - USB buffer (len: {}): {:?}, UART buffer (len: {}): {:?}",
-                        slice.len(),
-                        slice,
-                        chunk_len,
-                        &uart_tx_buf[..chunk_len]
-                    );
-                    if let Err(e) = tx.write(&uart_tx_buf[..chunk_len]).await {
-                        log::error!("Error writing to UART: {:?}", e);
-                        break;
-                    }
-                }
-                offset += chunk_len;
-            }
+    join(usb_future, uart_future).await;
+}
+
+/// Read from the USB and write it to the UART TX pipe
+async fn usb_read<'d, T: UsbInstance + 'd>(
+    usb_rx: &mut Receiver<'d, Driver<'d, T>>,
+    uart_pipe_writer: &mut embassy_sync::pipe::Writer<'_, NoopRawMutex, 64>,
+) -> Result<(), Disconnected> {
+    let mut buf = [0; 64];
+    loop {
+        let n = usb_rx.read_packet(&mut buf).await?;
+        let data = &buf[..n];
+        log::debug!("[UART]: USB IN: {:?}", data);
+        (*uart_pipe_writer).write(data).await;
+    }
+}
+
+/// Read from the USB TX pipe and write it to the USB
+async fn usb_write<'d, T: UsbInstance + 'd>(
+    usb_tx: &mut Sender<'d, Driver<'d, T>>,
+    usb_pipe_reader: &mut Reader<'_, NoopRawMutex, 64>,
+) -> Result<(), Disconnected> {
+    let mut buf = [0; 64];
+    loop {
+        let n = (*usb_pipe_reader).read(&mut buf).await;
+        let data = &buf[..n];
+        log::debug!("[UART]: USB OUT: {:?}", data);
+        usb_tx.write_packet(data).await?;
+    }
+}
+
+/// Read from the UART and write it to the USB TX pipe
+async fn uart_read<PIO: PioInstance, const SM: usize>(
+    uart_rx: &mut PioUartRx<'_, PIO, SM>,
+    usb_pipe_writer: &mut Writer<'_, NoopRawMutex, 64>,
+) -> ! {
+    loop {
+        let byte = uart_rx.read_u8().await;
+        let data = &[byte];
+        log::debug!("[UART]: UART IN: {:?}", data);
+        (*usb_pipe_writer).write(data).await;
+    }
+}
+
+/// Read from the UART TX pipe and write it to the UART
+async fn uart_write<PIO: PioInstance, const SM: usize>(
+    uart_tx: &mut PioUartTx<'_, PIO, SM>,
+    uart_pipe_reader: &mut Reader<'_, NoopRawMutex, 64>,
+) -> ! {
+    let mut buf = [0; 64];
+    loop {
+        let n = (*uart_pipe_reader).read(&mut buf).await;
+        let data = &buf[..n];
+        log::debug!("[UART]: UART OUT: {:?}", data);
+        for &byte in data {
+            uart_tx.write_u8(byte).await;
         }
-    };
-
-    let rx_future = async {
-        loop {
-            sender.wait_connection().await;
-            if let Err(e) = rx.read(&mut uart_rx_buf).await {
-                log::error!("Error reading from UART: {:?}", e);
-                continue;
-            }
-            let len = uart_rx_buf.iter().position(|&x| x == 0).unwrap_or(1);
-            if let Some(slice) = uart_rx_buf.get(..len) {
-                usb_rx_buf[..len].copy_from_slice(slice);
-                log::debug!(
-                    "UART to USB - UART buffer (len: {}): {:?}, USB buffer (len: {}): {:?}",
-                    slice.len(),
-                    slice,
-                    len,
-                    &usb_rx_buf[..len]
-                );
-                if let Err(e) = sender.write_packet(&usb_rx_buf[..len]).await {
-                    log::error!("Error writing packet: {:?}", e);
-                }
-            }
-        }
-    };
-
-    join(tx_future, rx_future).await;
+    }
 }
 
 #[embassy_executor::task]
 async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiResources) -> ! {
-    let mut config = SpiConfig::default(); // TODO: make this configurable
+    let mut config = SpiConfig::default();
     config.frequency = 12_000_000; // 12 MHz
 
     let mut spi = Spi::new(

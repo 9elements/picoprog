@@ -139,19 +139,17 @@ async fn main(spawner: Spawner) {
     let mut uid: [u8; 8] = [0; 8];
     flash.blocking_unique_id(&mut uid).unwrap_or_default();
 
-    static mut UID_STR: String<16> = String::<16>::new();
-    unsafe {
-        for byte in uid.iter() {
-            uwrite!(UID_STR, "{:02X}", *byte).unwrap_or_default();
-        }
+    static UID_STR: StaticCell<String<16>> = StaticCell::new();
+    let uid_str = UID_STR.init(String::<16>::new());
+    for byte in uid.iter() {
+        uwrite!(uid_str, "{:02X}", *byte).unwrap_or_default();
     }
-    let uid_str = unsafe { UID_STR.as_str() };
 
     let config = {
         let mut config = UsbConfig::new(0x1ced, 0xc0fe);
         config.manufacturer = Some("9elements");
         config.product = Some("Picoprog");
-        config.serial_number = Some(uid_str);
+        config.serial_number = Some(uid_str.as_str());
         config.max_power = 100;
         config.max_packet_size_0 = 64;
 

@@ -2,10 +2,77 @@ use embassy_rp::gpio::Output;
 use embassy_rp::spi::{Async, Instance as SpiInstance, Spi};
 use embassy_usb::class::cdc_acm::CdcAcmClass;
 use embassy_usb::driver::EndpointError;
+use tock_registers::register_bitfields;
+use tock_registers::LocalRegisterCopy;
+use zerocopy::byteorder::little_endian::{U16, U32};
+use zerocopy::{FromBytes, Immutable, IntoBytes, Unaligned};
+
+// Convert 3 bytes in little-endian format to u32
+fn le_u24_to_u32(bytes: &[u8]) -> u32 {
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0])
+}
 
 const S_ACK: u8 = 0x06;
 const S_NAK: u8 = 0x15;
 const MAX_BUFFER_SIZE: usize = 2048;
+
+#[derive(FromBytes, IntoBytes, Unaligned, Immutable)]
+#[repr(C, packed)]
+struct SSpiFreqRequest {
+    freq: U32,
+}
+
+#[derive(FromBytes, IntoBytes, Unaligned, Immutable)]
+#[repr(C, packed)]
+struct SSpiFreqResponse {
+    ack: u8,
+    freq: U32,
+}
+
+#[derive(FromBytes, IntoBytes, Unaligned, Immutable)]
+#[repr(C, packed)]
+struct QMaxLenResponse {
+    ack: u8,
+    size: [u8; 3], // 24-bit value
+}
+
+impl QMaxLenResponse {
+    fn new(size: usize) -> Self {
+        let bytes = size.to_le_bytes();
+        Self {
+            ack: S_ACK,
+            size: [bytes[0], bytes[1], bytes[2]],
+        }
+    }
+}
+
+#[derive(FromBytes, IntoBytes, Unaligned, Immutable)]
+#[repr(C, packed)]
+struct QPgmNameResponse {
+    ack: u8,
+    name: [u8; 16], // Fixed size array for programmer name
+}
+
+impl QPgmNameResponse {
+    fn new(name: &str) -> Self {
+        let mut response = Self {
+            ack: S_ACK,
+            name: [0; 16],
+        };
+        // Copy up to 15 bytes of the name, leaving room for null terminator
+        let bytes = name.as_bytes();
+        let len = core::cmp::min(bytes.len(), 15);
+        response.name[..len].copy_from_slice(&bytes[..len]);
+        response
+    }
+}
+
+#[derive(IntoBytes, Unaligned, Immutable)]
+#[repr(C, packed)]
+struct QIfaceResponse {
+    ack: u8,
+    version: U16,
+}
 
 pub enum SerprogCommand {
     Nop = 0x00,        // No operation
@@ -64,19 +131,65 @@ impl From<u8> for SerprogCommand {
     }
 }
 
-pub const CMDMAP: u32 = (1 << SerprogCommand::Nop as u32)
-    | (1 << SerprogCommand::QIface as u32)
-    | (1 << SerprogCommand::QCmdMap as u32)
-    | (1 << SerprogCommand::QPgmName as u32)
-    | (1 << SerprogCommand::QSerBuf as u32)
-    | (1 << SerprogCommand::QWrNMaxLen as u32)
-    | (1 << SerprogCommand::QBustype as u32)
-    | (1 << SerprogCommand::SyncNop as u32)
-    | (1 << SerprogCommand::QRdNMaxLen as u32)
-    | (1 << SerprogCommand::OSpiOp as u32)
-    | (1 << SerprogCommand::SBustype as u32)
-    | (1 << SerprogCommand::SSpiFreq as u32)
-    | (1 << SerprogCommand::SPinState as u32);
+#[derive(FromBytes, IntoBytes, Unaligned, Immutable)]
+#[repr(C, packed)]
+struct QCmdMapResponse {
+    ack: u8,
+    map: [u8; 4],    // First 32 bits for command flags
+    zeros: [u8; 28], // Remaining bits as zeros
+}
+
+register_bitfields! [u32,
+    Commands [
+        Nop OFFSET(0) NUMBITS(1) [],
+        QIface OFFSET(1) NUMBITS(1) [],
+        QCmdMap OFFSET(2) NUMBITS(1) [],
+        QPgmName OFFSET(3) NUMBITS(1) [],
+        QSerBuf OFFSET(4) NUMBITS(1) [],
+        QWrNMaxLen OFFSET(8) NUMBITS(1) [],
+        QBustype OFFSET(5) NUMBITS(1) [],
+        SyncNop OFFSET(16) NUMBITS(1) [],
+        QRdNMaxLen OFFSET(17) NUMBITS(1) [],
+        OSpiOp OFFSET(19) NUMBITS(1) [],
+        SBustype OFFSET(18) NUMBITS(1) [],
+        SSpiFreq OFFSET(20) NUMBITS(1) [],
+        SPinState OFFSET(21) NUMBITS(1) []
+    ]
+];
+
+impl QCmdMapResponse {
+    fn new() -> Self {
+        let mut response = Self {
+            ack: S_ACK,
+            map: [0; 4],
+            zeros: [0; 28],
+        };
+
+        // Set supported commands using tock-registers
+        let mut cmdmap = LocalRegisterCopy::<u32, Commands::Register>::new(0);
+        cmdmap.modify(
+            Commands::Nop::SET
+                + Commands::QIface::SET
+                + Commands::QCmdMap::SET
+                + Commands::QPgmName::SET
+                + Commands::QSerBuf::SET
+                + Commands::QWrNMaxLen::SET
+                + Commands::QBustype::SET
+                + Commands::SyncNop::SET
+                + Commands::QRdNMaxLen::SET
+                + Commands::OSpiOp::SET
+                + Commands::SBustype::SET
+                + Commands::SSpiFreq::SET
+                + Commands::SPinState::SET,
+        );
+
+        // Get the bits and store in first 4 bytes, rest stays as zeros
+        let bits = cmdmap.get();
+        response.map[0..4].copy_from_slice(&bits.to_le_bytes());
+
+        response
+    }
+}
 
 pub struct Disconnected {}
 
@@ -115,32 +228,25 @@ impl<SPI: SpiInstance + 'static> Serprog<SPI> {
             }
             SerprogCommand::QIface => {
                 log::debug!("Received QIface CMD");
-                if let Err(e) = class.write_packet(&[S_ACK, 0x01, 0x00]).await {
+                let response = QIfaceResponse {
+                    ack: S_ACK,
+                    version: U16::new(1),
+                };
+                if let Err(e) = class.write_packet(response.as_bytes()).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::QCmdMap => {
                 log::debug!("Received QCmdMap CMD");
-                let cmdmap_bytes = CMDMAP.to_le_bytes();
-                let mut packet = [0; 33];
-                packet[0] = S_ACK;
-                packet[1] = cmdmap_bytes[0];
-                packet[2] = cmdmap_bytes[1];
-                packet[3] = cmdmap_bytes[2];
-                packet[4] = cmdmap_bytes[3];
-                if let Err(e) = class.write_packet(&packet).await {
+                let response = QCmdMapResponse::new();
+                if let Err(e) = class.write_packet(response.as_bytes()).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::QPgmName => {
                 log::debug!("Received QPgmName CMD");
-                if let Err(e) = class
-                    .write_packet(&[
-                        S_ACK, b'P', b'i', b'c', b'o', b'p', b'r', b'o', b'g', 0, 0, 0, 0, 0, 0, 0,
-                        0,
-                    ])
-                    .await
-                {
+                let response = QPgmNameResponse::new("Picoprog");
+                if let Err(e) = class.write_packet(response.as_bytes()).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
@@ -152,11 +258,8 @@ impl<SPI: SpiInstance + 'static> Serprog<SPI> {
             }
             SerprogCommand::QWrNMaxLen | SerprogCommand::QRdNMaxLen => {
                 log::debug!("Received QWrNMaxLen/QRdNMaxLen CMD");
-                let size_24 = MAX_BUFFER_SIZE.to_le_bytes();
-                if let Err(e) = class
-                    .write_packet(&[S_ACK, size_24[0], size_24[1], size_24[2]])
-                    .await
-                {
+                let response = QMaxLenResponse::new(MAX_BUFFER_SIZE);
+                if let Err(e) = class.write_packet(response.as_bytes()).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
@@ -196,8 +299,8 @@ impl<SPI: SpiInstance + 'static> Serprog<SPI> {
                     log::error!("Error reading packet: {:?}", e);
                     return;
                 }
-                let op_slen = u32::from_le_bytes([buf[0], buf[1], buf[2], 0]);
-                let op_rlen = u32::from_le_bytes([buf[3], buf[4], buf[5], 0]);
+                let op_slen = le_u24_to_u32(&buf[0..3]);
+                let op_rlen = le_u24_to_u32(&buf[3..6]);
 
                 let mut sdata = [0_u8; MAX_BUFFER_SIZE];
                 let mut rdata = [0_u8; MAX_BUFFER_SIZE];
@@ -283,21 +386,21 @@ impl<SPI: SpiInstance + 'static> Serprog<SPI> {
                     log::error!("Error reading packet: {:?}", e);
                     return;
                 }
-                log::debug!("Received SSpiFreq packet: {:?}", buf);
-                let try_freq = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+
+                // Parse the request using zerocopy
+                let request = SSpiFreqRequest::read_from_bytes(&buf[0..4]).unwrap();
+                let try_freq = request.freq.get();
+
                 log::debug!("Setting SPI frequency: {:?}", try_freq);
                 self.spi.set_frequency(try_freq);
-                let actual_freq = try_freq.to_le_bytes(); // TODO can we report what the hardware has set up?
-                if let Err(e) = class
-                    .write_packet(&[
-                        S_ACK,
-                        actual_freq[0],
-                        actual_freq[1],
-                        actual_freq[2],
-                        actual_freq[3],
-                    ])
-                    .await
-                {
+
+                // Create and send response
+                let response = SSpiFreqResponse {
+                    ack: S_ACK,
+                    freq: U32::new(try_freq), // TODO can we report what the hardware has set up?
+                };
+
+                if let Err(e) = class.write_packet(response.as_bytes()).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }

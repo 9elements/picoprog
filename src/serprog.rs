@@ -136,7 +136,7 @@ impl From<u8> for SerprogCommand {
 struct QCmdMapResponse {
     ack: u8,
     map: [u8; 4],    // First 32 bits for command flags
-    zeros: [u8; 28], // Remaining bits as zeros
+    zeros: [u8; 28], // Remaining bits as zeros, for future use
 }
 
 register_bitfields! [u32,
@@ -146,14 +146,24 @@ register_bitfields! [u32,
         QCmdMap OFFSET(2) NUMBITS(1) [],
         QPgmName OFFSET(3) NUMBITS(1) [],
         QSerBuf OFFSET(4) NUMBITS(1) [],
-        QWrNMaxLen OFFSET(8) NUMBITS(1) [],
         QBustype OFFSET(5) NUMBITS(1) [],
+        QChipSize OFFSET(6) NUMBITS(1) [],
+        QOpBuf OFFSET(7) NUMBITS(1) [],
+        QWrNMaxLen OFFSET(8) NUMBITS(1) [],
+        RByte OFFSET(9) NUMBITS(1) [],
+        RNBytes OFFSET(10) NUMBITS(1) [],
+        OInit OFFSET(11) NUMBITS(1) [],
+        OWriteB OFFSET(12) NUMBITS(1) [],
+        OWriteN OFFSET(13) NUMBITS(1) [],
+        ODelay OFFSET(14) NUMBITS(1) [],
+        OExec OFFSET(15) NUMBITS(1) [],
         SyncNop OFFSET(16) NUMBITS(1) [],
         QRdNMaxLen OFFSET(17) NUMBITS(1) [],
-        OSpiOp OFFSET(19) NUMBITS(1) [],
         SBustype OFFSET(18) NUMBITS(1) [],
+        OSpiOp OFFSET(19) NUMBITS(1) [],
         SSpiFreq OFFSET(20) NUMBITS(1) [],
-        SPinState OFFSET(21) NUMBITS(1) []
+        SPinState OFFSET(21) NUMBITS(1) [],
+        SSpiCs OFFSET(22) NUMBITS(1) []
     ]
 ];
 

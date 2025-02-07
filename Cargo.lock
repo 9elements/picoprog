@@ -971,6 +971,7 @@ dependencies = [
  "futures",
  "heapless",
  "log",
+ "num_enum",
  "portable-atomic",
  "static_cell",
  "tock-registers",

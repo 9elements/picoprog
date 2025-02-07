@@ -2,6 +2,7 @@ use embassy_rp::gpio::Output;
 use embassy_rp::spi::{Async, Instance as SpiInstance, Spi};
 use embassy_usb::class::cdc_acm::CdcAcmClass;
 use embassy_usb::driver::EndpointError;
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 use tock_registers::register_bitfields;
 use tock_registers::LocalRegisterCopy;
 use zerocopy::byteorder::little_endian::{U16, U32};
@@ -74,6 +75,8 @@ struct QIfaceResponse {
     version: U16,
 }
 
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u8)]
 pub enum SerprogCommand {
     Nop = 0x00,        // No operation
     QIface = 0x01,     // Query interface version
@@ -98,37 +101,6 @@ pub enum SerprogCommand {
     SSpiFreq = 0x14,   // Set SPI clock frequency
     SPinState = 0x15,  // Enable/disable output drivers
     SSpiCs = 0x16,     // Select Chip Select to use
-}
-
-impl From<u8> for SerprogCommand {
-    fn from(value: u8) -> Self {
-        match value {
-            0x00 => SerprogCommand::Nop,
-            0x01 => SerprogCommand::QIface,
-            0x02 => SerprogCommand::QCmdMap,
-            0x03 => SerprogCommand::QPgmName,
-            0x04 => SerprogCommand::QSerBuf,
-            0x05 => SerprogCommand::QBustype,
-            0x06 => SerprogCommand::QChipSize,
-            0x07 => SerprogCommand::QOpBuf,
-            0x08 => SerprogCommand::QWrNMaxLen,
-            0x09 => SerprogCommand::RByte,
-            0x0A => SerprogCommand::RNBytes,
-            0x0B => SerprogCommand::OInit,
-            0x0C => SerprogCommand::OWriteB,
-            0x0D => SerprogCommand::OWriteN,
-            0x0E => SerprogCommand::ODelay,
-            0x0F => SerprogCommand::OExec,
-            0x10 => SerprogCommand::SyncNop,
-            0x11 => SerprogCommand::QRdNMaxLen,
-            0x12 => SerprogCommand::SBustype,
-            0x13 => SerprogCommand::OSpiOp,
-            0x14 => SerprogCommand::SSpiFreq,
-            0x15 => SerprogCommand::SPinState,
-            0x16 => SerprogCommand::SSpiCs,
-            _ => SerprogCommand::Nop,
-        }
-    }
 }
 
 #[derive(FromBytes, IntoBytes, Unaligned, Immutable)]

@@ -183,7 +183,7 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
             log::error!("Error reading packet: {:?}", e);
             continue;
         }
-        let cmd = serprog::SerprogCommand::from(buf[0]);
+        let cmd = serprog::SerprogCommand::try_from(buf[0]).unwrap_or(serprog::SerprogCommand::Nop);
         serprog.handle_command(cmd, &mut class, &mut buf).await;
     }
 }

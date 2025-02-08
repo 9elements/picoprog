@@ -1,7 +1,7 @@
-use embassy_rp::gpio::Output;
-use embassy_rp::spi::{Async, Instance as SpiInstance, Spi};
 use embassy_usb::class::cdc_acm::CdcAcmClass;
 use embassy_usb::driver::EndpointError;
+use embedded_hal::digital::OutputPin;
+use embedded_hal_async::spi::SpiBus;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use tock_registers::register_bitfields;
 use tock_registers::LocalRegisterCopy;
@@ -184,14 +184,19 @@ impl From<EndpointError> for Disconnected {
     }
 }
 
-pub struct Serprog<SPI: SpiInstance + 'static> {
-    spi: Spi<'static, SPI, Async>,
-    cs: Output<'static>,
-    led: Output<'static>,
+pub struct Serprog<SPI, CS, LED> {
+    spi: SPI,
+    cs: CS,
+    led: LED,
 }
 
-impl<SPI: SpiInstance + 'static> Serprog<SPI> {
-    pub fn new(spi: Spi<'static, SPI, Async>, cs: Output<'static>, led: Output<'static>) -> Self {
+impl<SPI, CS, LED> Serprog<SPI, CS, LED>
+where
+    SPI: SpiBus<u8>,
+    CS: OutputPin,
+    LED: OutputPin,
+{
+    pub fn new(spi: SPI, cs: CS, led: LED) -> Self {
         Self { spi, cs, led }
     }
 
@@ -200,7 +205,11 @@ impl<SPI: SpiInstance + 'static> Serprog<SPI> {
         cmd: SerprogCommand,
         class: &'a mut CdcAcmClass<'static, D>,
         buf: &'a mut [u8],
-    ) {
+    ) where
+        SPI::Error: core::fmt::Debug,
+        CS::Error: core::fmt::Debug,
+        LED::Error: core::fmt::Debug,
+    {
         match cmd {
             SerprogCommand::Nop => {
                 log::debug!("Received Nop CMD");
@@ -310,15 +319,18 @@ impl<SPI: SpiInstance + 'static> Serprog<SPI> {
                 );
 
                 // This call is blocking according to the SPI HAL
-                if let Err(e) = self.spi.flush() {
-                    log::error!("Error flushing SPI: {:?}", e);
+                if (self.spi.flush().await).is_err() {
+                    log::error!("Error flushing SPI");
                 }
 
-                self.cs.set_low();
+                if self.cs.set_low().is_err() {
+                    log::error!("Error setting CS low");
+                }
+
                 match self.spi.write(&sdata[..op_slen as usize]).await {
                     Ok(_) => {
-                        log::debug!("SPI write successful");
-                        log::debug!("Sent data (sdata): {:?}", &sdata[..op_slen as usize]);
+                        log::debug!("SPI transfer successful");
+                        log::debug!("Received data (rdata): {:?}", &rdata[..op_rlen as usize]);
                         match self.spi.read(&mut rdata[..op_rlen as usize]).await {
                             Ok(_) => {
                                 log::debug!("SPI read successful");
@@ -329,6 +341,7 @@ impl<SPI: SpiInstance + 'static> Serprog<SPI> {
                                 if let Err(e) = class.write_packet(&[S_ACK]).await {
                                     log::error!("Error writing packet: {:?}", e);
                                 }
+
                                 // Send the full rdata in chunks
                                 let mut bytes_written = 0;
                                 while bytes_written < op_rlen as usize {
@@ -353,14 +366,17 @@ impl<SPI: SpiInstance + 'static> Serprog<SPI> {
                             }
                         }
                     }
-                    Err(e) => {
-                        log::error!("SPI write error: {:?}", e);
+                    Err(_) => {
+                        log::error!("SPI transfer error");
                         if let Err(e) = class.write_packet(&[S_NAK]).await {
                             log::error!("Error writing NAK: {:?}", e);
                         }
                     }
                 }
-                self.cs.set_high();
+
+                if self.cs.set_high().is_err() {
+                    log::error!("Error setting CS high");
+                }
             }
             SerprogCommand::SSpiFreq => {
                 log::debug!("Received SSpiFreq CMD");
@@ -374,7 +390,7 @@ impl<SPI: SpiInstance + 'static> Serprog<SPI> {
                 let try_freq = request.freq.get();
 
                 log::debug!("Setting SPI frequency: {:?}", try_freq);
-                self.spi.set_frequency(try_freq);
+                // SPI frequency setting not supported in generic implementation
 
                 // Create and send response
                 let response = SSpiFreqResponse {
@@ -393,9 +409,11 @@ impl<SPI: SpiInstance + 'static> Serprog<SPI> {
                     return;
                 }
                 if buf[0] == 0 {
-                    self.led.set_low();
-                } else {
-                    self.led.set_high();
+                    if self.led.set_low().is_err() {
+                        log::error!("Error setting LED low");
+                    }
+                } else if self.led.set_high().is_err() {
+                    log::error!("Error setting LED high");
                 }
                 if let Err(e) = class.write_packet(&[S_ACK]).await {
                     log::error!("Error writing packet: {:?}", e);

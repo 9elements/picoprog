@@ -968,6 +968,8 @@ dependencies = [
  "embassy-time",
  "embassy-usb",
  "embassy-usb-logger",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
  "futures",
  "heapless",
  "log",

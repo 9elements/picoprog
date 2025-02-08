@@ -1,0 +1,17 @@
+[package]
+name = "serprog"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+embassy-usb = { version = "0.4.0", features = ["max-handler-count-6", "max-interface-count-6"] }
+embedded-hal = "1.0.0"
+embedded-hal-async = "1.0.0"
+log = "0.4.22"
+num_enum = { version = "0.7.3", default-features = false }
+tock-registers = "0.9.0"
+zerocopy = { version = "0.8", features = ["derive"] }
+
+[patch.crates-io]
+embassy-usb = { git = "https://github.com/embassy-rs/embassy", rev = "556cc57c1fdc9eba0703ccc2281d39462d2d2c38" }

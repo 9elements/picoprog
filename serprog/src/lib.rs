@@ -1,3 +1,8 @@
+#![no_std]
+
+use core::convert::From;
+use core::panic;
+use core::result::Result::{Err, Ok};
 use embassy_usb::class::cdc_acm::CdcAcmClass;
 use embassy_usb::driver::EndpointError;
 use embedded_hal::digital::OutputPin;

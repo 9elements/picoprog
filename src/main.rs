@@ -24,7 +24,6 @@ use heapless::String;
 use static_cell::StaticCell;
 use ufmt::uwrite;
 
-mod serprog;
 mod uart;
 
 bind_interrupts!(struct Irqs {

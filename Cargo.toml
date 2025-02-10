@@ -14,7 +14,7 @@ embassy-futures = "0.1.1"
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
 serprog = { path = "./serprog" }
-embassy-rp = { version = "0.3.0", features = ["unstable-pac", "time-driver", "critical-section-impl", "rom-func-cache", "rom-v2-intrinsics", "rp2040"] }
+embassy-rp = { version = "0.3.1", features = ["unstable-pac", "time-driver", "critical-section-impl", "rom-func-cache", "rom-v2-intrinsics", "rp2040"] }
 embassy-sync = "0.6.2"
 embassy-time = "0.4.0"
 embassy-usb = { version = "0.4.0", features = ["max-handler-count-6", "max-interface-count-6"] }
@@ -28,15 +28,6 @@ ufmt = "0.2.0"
 zerocopy = { version = "0.8", features = ["derive"] }
 tock-registers = "0.9.0"
 num_enum = { version = "0.7.3", default-features = false }
-
-[patch.crates-io]
-embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "556cc57c1fdc9eba0703ccc2281d39462d2d2c38" }
-embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "556cc57c1fdc9eba0703ccc2281d39462d2d2c38" }
-embassy-rp = { git = "https://github.com/embassy-rs/embassy", rev = "556cc57c1fdc9eba0703ccc2281d39462d2d2c38" }
-embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "556cc57c1fdc9eba0703ccc2281d39462d2d2c38" }
-embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "556cc57c1fdc9eba0703ccc2281d39462d2d2c38" }
-embassy-usb = { git = "https://github.com/embassy-rs/embassy", rev = "556cc57c1fdc9eba0703ccc2281d39462d2d2c38" }
-embassy-usb-logger = { git = "https://github.com/embassy-rs/embassy", rev = "556cc57c1fdc9eba0703ccc2281d39462d2d2c38" }
 
 [profile.release]
 debug = true

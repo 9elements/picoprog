@@ -1,18 +1,11 @@
 [workspace]
 members = [
-    ".",
+    "picoprog",
     "serprog"
 ]
 resolver = "2"
 
-[package]
-name = "picoprog"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
-authors = ["Marvin Drees <marvin.drees@9elements.com>"]
-
-[dependencies]
+[workspace.dependencies]
 assign-resources = "0.4.1"
 cortex-m = { version = "0.7.7", features = ["inline-asm", "critical-section"] }
 cortex-m-rt = "0.7.5"

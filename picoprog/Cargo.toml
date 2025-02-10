@@ -1,0 +1,30 @@
+[package]
+name = "picoprog"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Marvin Drees <marvin.drees@9elements.com>"]
+
+[dependencies]
+assign-resources = "0.4.1"
+cortex-m = { workspace = true, features = ["inline-asm", "critical-section"] }
+cortex-m-rt = { workspace = true }
+embassy-executor = { workspace = true, features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "nightly"] }
+embassy-futures = "0.1.1"
+embedded-hal = { workspace = true }
+embedded-hal-async = { workspace = true }
+serprog = { path = "../serprog" }
+embassy-rp = { workspace = true, features = ["unstable-pac", "time-driver", "critical-section-impl", "rom-func-cache", "rom-v2-intrinsics", "rp2040"] }
+embassy-sync = { workspace = true }
+embassy-time = { workspace = true }
+embassy-usb = { workspace = true, features = ["max-handler-count-6", "max-interface-count-6"] }
+embassy-usb-logger = { workspace = true }
+futures = { version = "0.3.30", default-features = false, features = ["async-await", "cfg-target-has-atomic", "unstable"] }
+heapless = { workspace = true, features = ["portable-atomic-critical-section", "ufmt"] }
+log = { workspace = true }
+portable-atomic = { workspace = true, features = ["critical-section"] }
+static_cell = { workspace = true }
+ufmt = "0.2.0"
+zerocopy = { workspace = true, features = ["derive"] }
+tock-registers = { workspace = true }
+num_enum = { workspace = true, default-features = false }

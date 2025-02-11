@@ -2,15 +2,16 @@
 
 use core::convert::From;
 use core::result::Result::{Err, Ok};
-use embassy_usb::class::cdc_acm::CdcAcmClass;
-use embassy_usb::driver::Driver;
 use embedded_hal::digital::OutputPin;
 use embedded_hal_async::spi::SpiBus;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use tock_registers::register_bitfields;
 use tock_registers::LocalRegisterCopy;
+use transport::Transport;
 use zerocopy::byteorder::little_endian::{U16, U32};
-use zerocopy::{FromBytes, Immutable, IntoBytes, Unaligned};
+use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, Unaligned};
+
+pub mod transport;
 
 // Convert 3 bytes in little-endian format to u32
 fn le_u24_to_u32(bytes: &[u8]) -> u32 {
@@ -180,64 +181,56 @@ impl QCmdMapResponse {
     }
 }
 
-pub struct Serprog<SPI, CS, LED, D: Driver<'static>, F> {
+pub struct Serprog<SPI, CS, LED, T: Transport, F> {
     spi: SPI,
     cs: CS,
     led: LED,
-    class: CdcAcmClass<'static, D>,
+    transport: T,
     freq_callback: Option<F>,
 }
 
-impl<SPI, CS, LED, D, F> Serprog<SPI, CS, LED, D, F>
+impl<SPI, CS, LED, T, F> Serprog<SPI, CS, LED, T, F>
 where
     SPI: SpiBus<u8>,
     CS: OutputPin,
     LED: OutputPin,
-    D: Driver<'static>,
+    T: Transport,
     F: FnMut(&mut SPI, u32) + Send + Sync,
 {
-    pub fn new(
-        spi: SPI,
-        cs: CS,
-        led: LED,
-        class: CdcAcmClass<'static, D>,
-        freq_callback: Option<F>,
-    ) -> Self {
+    pub fn new(spi: SPI, cs: CS, led: LED, transport: T, freq_callback: Option<F>) -> Self {
         Self {
             spi,
             cs,
             led,
-            class,
+            transport,
             freq_callback,
         }
     }
 
     pub async fn run_loop(mut self) -> ! {
-        let mut buf = [0; 64];
+        let mut buf = [0; 1];
 
         loop {
-            self.class.wait_connection().await;
-            if let Err(e) = self.class.read_packet(&mut buf).await {
-                log::error!("Error reading packet: {:?}", e);
+            if let Err(e) = self.transport.read(&mut buf).await {
+                log::error!("Read error: {:?}", e);
                 continue;
             }
 
             let cmd = SerprogCommand::try_from(buf[0]).unwrap_or(SerprogCommand::Nop);
-            self.handle_command(cmd, &mut buf).await;
+            self.handle_command(cmd).await;
         }
     }
 
-    async fn handle_command(&mut self, cmd: SerprogCommand, buf: &mut [u8])
+    async fn handle_command(&mut self, cmd: SerprogCommand)
     where
         SPI::Error: core::fmt::Debug,
         CS::Error: core::fmt::Debug,
         LED::Error: core::fmt::Debug,
-        D: Driver<'static>,
     {
         match cmd {
             SerprogCommand::Nop => {
                 log::debug!("Received Nop CMD");
-                if let Err(e) = self.class.write_packet(&[S_ACK]).await {
+                if let Err(e) = self.transport.write(&[S_ACK]).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
@@ -247,94 +240,81 @@ where
                     ack: S_ACK,
                     version: U16::new(1),
                 };
-                if let Err(e) = self.class.write_packet(response.as_bytes()).await {
+                if let Err(e) = self.transport.write(response.as_bytes()).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::QCmdMap => {
                 log::debug!("Received QCmdMap CMD");
                 let response = QCmdMapResponse::new(self.freq_callback.is_some());
-                if let Err(e) = self.class.write_packet(response.as_bytes()).await {
+                if let Err(e) = self.transport.write(response.as_bytes()).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::QPgmName => {
                 log::debug!("Received QPgmName CMD");
                 let response = QPgmNameResponse::new("Picoprog");
-                if let Err(e) = self.class.write_packet(response.as_bytes()).await {
+                if let Err(e) = self.transport.write(response.as_bytes()).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::QSerBuf => {
                 log::debug!("Received QSerBuf CMD");
-                if let Err(e) = self.class.write_packet(&[S_ACK, 0xFF, 0xFF]).await {
+                if let Err(e) = self.transport.write(&[S_ACK, 0xFF, 0xFF]).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::QWrNMaxLen | SerprogCommand::QRdNMaxLen => {
                 log::debug!("Received QWrNMaxLen/QRdNMaxLen CMD");
                 let response = QMaxLenResponse::new(MAX_BUFFER_SIZE);
-                if let Err(e) = self.class.write_packet(response.as_bytes()).await {
+                if let Err(e) = self.transport.write(response.as_bytes()).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::QBustype => {
                 log::debug!("Received QBustype CMD");
-                if let Err(e) = self.class.write_packet(&[S_ACK, 0x08]).await {
+                if let Err(e) = self.transport.write(&[S_ACK, 0x08]).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::SyncNop => {
                 log::debug!("Received SyncNop CMD");
-                if let Err(e) = self.class.write_packet(&[S_NAK, S_ACK]).await {
+                if let Err(e) = self.transport.write(&[S_NAK, S_ACK]).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::SBustype => {
                 log::debug!("Received SBustype CMD");
-                if let Err(e) = self.class.read_packet(buf).await {
+                let mut buf = [0u8; 1];
+                if let Err(e) = self.transport.read(&mut buf).await {
                     log::error!("Error reading packet: {:?}", e);
                     return;
                 }
                 if buf[0] == 0x08 {
                     log::debug!("Received SBustype 'SPI'");
-                    if let Err(e) = self.class.write_packet(&[S_ACK]).await {
+                    if let Err(e) = self.transport.write(&[S_ACK]).await {
                         log::error!("Error writing packet: {:?}", e);
                     }
                 } else {
                     log::debug!("Received unknown SBustype");
-                    if let Err(e) = self.class.write_packet(&[S_NAK]).await {
+                    if let Err(e) = self.transport.write(&[S_NAK]).await {
                         log::error!("Error writing packet: {:?}", e);
                     }
                 }
             }
             SerprogCommand::OSpiOp => {
                 log::debug!("Received OSpiOp CMD");
-                if let Err(e) = self.class.read_packet(buf).await {
+                let mut sdata = [0_u8; MAX_BUFFER_SIZE + 6];
+                if let Err(e) = self.transport.read(sdata.as_mut_slice()).await {
                     log::error!("Error reading packet: {:?}", e);
                     return;
                 }
-                let op_slen = le_u24_to_u32(&buf[0..3]);
-                let op_rlen = le_u24_to_u32(&buf[3..6]);
+                let op_slen = le_u24_to_u32(&sdata[0..3]) as usize;
+                let op_rlen = le_u24_to_u32(&sdata[3..6]) as usize;
 
-                let mut sdata = [0_u8; MAX_BUFFER_SIZE];
                 let mut rdata = [0_u8; MAX_BUFFER_SIZE];
 
-                // Copy initial chunk from buf starting at byte position 6 (sdata)
-                let initial_chunk_size = core::cmp::min(64 - 6, op_slen as usize);
-                sdata[..initial_chunk_size].copy_from_slice(&buf[6..6 + initial_chunk_size]);
-                let mut bytes_read = initial_chunk_size;
-
-                // Read the remaining sdata in chunks
-                while bytes_read < op_slen as usize {
-                    let chunk_size = core::cmp::min(64, op_slen as usize - bytes_read);
-                    if let Err(e) = self.class.read_packet(&mut buf[..chunk_size]).await {
-                        log::error!("Error reading packet: {:?}", e);
-                        return;
-                    }
-                    sdata[bytes_read..bytes_read + chunk_size].copy_from_slice(&buf[..chunk_size]);
-                    bytes_read += chunk_size;
-                }
+                let sdata = &sdata.as_slice()[6..6 + op_slen];
 
                 log::debug!(
                     "Starting SPI transfer, sdata: {:?}, rdata: {:?}",
@@ -362,30 +342,16 @@ where
                                     "Received data (rdata): {:?}",
                                     &rdata[..op_rlen as usize]
                                 );
-                                if let Err(e) = self.class.write_packet(&[S_ACK]).await {
+                                if let Err(e) = self.transport.write(&[S_ACK]).await {
                                     log::error!("Error writing packet: {:?}", e);
                                 }
 
                                 // Send the full rdata in chunks
-                                let mut bytes_written = 0;
-                                while bytes_written < op_rlen as usize {
-                                    let chunk_size =
-                                        core::cmp::min(64, op_rlen as usize - bytes_written);
-                                    if let Err(e) = self
-                                        .class
-                                        .write_packet(
-                                            &rdata[bytes_written..bytes_written + chunk_size],
-                                        )
-                                        .await
-                                    {
-                                        log::error!("Error writing rdata: {:?}", e);
-                                    }
-                                    bytes_written += chunk_size;
-                                }
+                                let _ = self.transport.write(&rdata[..op_rlen as usize]).await;
                             }
                             Err(e) => {
                                 log::error!("SPI read error: {:?}", e);
-                                if let Err(e) = self.class.write_packet(&[S_NAK]).await {
+                                if let Err(e) = self.transport.write(&[S_NAK]).await {
                                     log::error!("Error writing NAK: {:?}", e);
                                 }
                             }
@@ -393,7 +359,7 @@ where
                     }
                     Err(_) => {
                         log::error!("SPI transfer error");
-                        if let Err(e) = self.class.write_packet(&[S_NAK]).await {
+                        if let Err(e) = self.transport.write(&[S_NAK]).await {
                             log::error!("Error writing NAK: {:?}", e);
                         }
                     }
@@ -405,13 +371,13 @@ where
             }
             SerprogCommand::SSpiFreq => {
                 log::debug!("Received SSpiFreq CMD");
-                if let Err(e) = self.class.read_packet(buf).await {
+                let mut request = SSpiFreqRequest::new_zeroed();
+                if let Err(e) = self.transport.read(request.as_mut_bytes()).await {
                     log::error!("Error reading packet: {:?}", e);
                     return;
                 }
 
                 // Parse the request using zerocopy
-                let request = SSpiFreqRequest::read_from_bytes(&buf[0..4]).unwrap();
                 let try_freq = request.freq.get();
 
                 log::debug!("Setting SPI frequency: {:?}", try_freq);
@@ -427,13 +393,14 @@ where
                     freq: U32::new(try_freq), // TODO can we report what the hardware has set up?
                 };
 
-                if let Err(e) = self.class.write_packet(response.as_bytes()).await {
+                if let Err(e) = self.transport.write(response.as_bytes()).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
             SerprogCommand::SPinState => {
                 log::debug!("Received SPinState CMD");
-                if let Err(e) = self.class.read_packet(buf).await {
+                let mut buf = [0u8; 1];
+                if let Err(e) = self.transport.read(&mut buf).await {
                     log::error!("Error reading packet: {:?}", e);
                     return;
                 }
@@ -444,13 +411,13 @@ where
                 } else if self.led.set_high().is_err() {
                     log::error!("Error setting LED high");
                 }
-                if let Err(e) = self.class.write_packet(&[S_ACK]).await {
+                if let Err(e) = self.transport.write(&[S_ACK]).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }
             _ => {
                 log::debug!("Received unknown CMD");
-                if let Err(e) = self.class.write_packet(&[S_NAK]).await {
+                if let Err(e) = self.transport.write(&[S_NAK]).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
             }

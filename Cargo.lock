@@ -1188,7 +1188,6 @@ dependencies = [
 name = "serprog"
 version = "0.1.0"
 dependencies = [
- "embassy-sync",
  "embassy-usb",
  "embedded-hal 1.0.0",
  "embedded-hal-async",

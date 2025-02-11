@@ -1,10 +1,9 @@
 #![no_std]
 
 use core::convert::From;
-use core::panic;
 use core::result::Result::{Err, Ok};
 use embassy_usb::class::cdc_acm::CdcAcmClass;
-use embassy_usb::driver::{Driver, EndpointError};
+use embassy_usb::driver::Driver;
 use embedded_hal::digital::OutputPin;
 use embedded_hal_async::spi::SpiBus;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
@@ -178,17 +177,6 @@ impl QCmdMapResponse {
         response.map[0..4].copy_from_slice(&bits.to_le_bytes());
 
         response
-    }
-}
-
-pub struct Disconnected {}
-
-impl From<EndpointError> for Disconnected {
-    fn from(val: EndpointError) -> Self {
-        match val {
-            EndpointError::BufferOverflow => panic!("USB buffer overflow"),
-            EndpointError::Disabled => Disconnected {},
-        }
     }
 }
 

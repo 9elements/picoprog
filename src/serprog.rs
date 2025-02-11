@@ -140,7 +140,7 @@ register_bitfields! [u32,
 ];
 
 impl QCmdMapResponse {
-    fn new() -> Self {
+    fn new(has_freq_callback: bool) -> Self {
         let mut response = Self {
             ack: S_ACK,
             map: [0; 4],
@@ -149,21 +149,24 @@ impl QCmdMapResponse {
 
         // Set supported commands using tock-registers
         let mut cmdmap = LocalRegisterCopy::<u32, Commands::Register>::new(0);
-        cmdmap.modify(
-            Commands::Nop::SET
-                + Commands::QIface::SET
-                + Commands::QCmdMap::SET
-                + Commands::QPgmName::SET
-                + Commands::QSerBuf::SET
-                + Commands::QWrNMaxLen::SET
-                + Commands::QBustype::SET
-                + Commands::SyncNop::SET
-                + Commands::QRdNMaxLen::SET
-                + Commands::OSpiOp::SET
-                + Commands::SBustype::SET
-                + Commands::SSpiFreq::SET
-                + Commands::SPinState::SET,
-        );
+        let mut cmd_flags = Commands::Nop::SET
+            + Commands::QIface::SET
+            + Commands::QCmdMap::SET
+            + Commands::QPgmName::SET
+            + Commands::QSerBuf::SET
+            + Commands::QWrNMaxLen::SET
+            + Commands::QBustype::SET
+            + Commands::SyncNop::SET
+            + Commands::QRdNMaxLen::SET
+            + Commands::OSpiOp::SET
+            + Commands::SBustype::SET
+            + Commands::SPinState::SET;
+
+        if has_freq_callback {
+            cmd_flags += Commands::SSpiFreq::SET;
+        }
+
+        cmdmap.modify(cmd_flags);
 
         // Get the bits and store in first 4 bytes, rest stays as zeros
         let bits = cmdmap.get();
@@ -184,20 +187,27 @@ impl From<EndpointError> for Disconnected {
     }
 }
 
-pub struct Serprog<SPI, CS, LED> {
+pub struct Serprog<SPI, CS, LED, F> {
     spi: SPI,
     cs: CS,
     led: LED,
+    freq_callback: Option<F>,
 }
 
-impl<SPI, CS, LED> Serprog<SPI, CS, LED>
+impl<SPI, CS, LED, F> Serprog<SPI, CS, LED, F>
 where
     SPI: SpiBus<u8>,
     CS: OutputPin,
     LED: OutputPin,
+    F: FnMut(&mut SPI, u32) + Send + Sync,
 {
-    pub fn new(spi: SPI, cs: CS, led: LED) -> Self {
-        Self { spi, cs, led }
+    pub fn new(spi: SPI, cs: CS, led: LED, freq_callback: Option<F>) -> Self {
+        Self {
+            spi,
+            cs,
+            led,
+            freq_callback,
+        }
     }
 
     pub async fn handle_command<'a, D: embassy_usb::driver::Driver<'static>>(
@@ -229,7 +239,7 @@ where
             }
             SerprogCommand::QCmdMap => {
                 log::debug!("Received QCmdMap CMD");
-                let response = QCmdMapResponse::new();
+                let response = QCmdMapResponse::new(self.freq_callback.is_some());
                 if let Err(e) = class.write_packet(response.as_bytes()).await {
                     log::error!("Error writing packet: {:?}", e);
                 }
@@ -390,7 +400,11 @@ where
                 let try_freq = request.freq.get();
 
                 log::debug!("Setting SPI frequency: {:?}", try_freq);
-                // SPI frequency setting not supported in generic implementation
+
+                // Call the frequency callback if set
+                if let Some(callback) = &mut self.freq_callback {
+                    (callback)(&mut self.spi, try_freq);
+                }
 
                 // Create and send response
                 let response = SSpiFreqResponse {

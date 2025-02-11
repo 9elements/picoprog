@@ -12,7 +12,7 @@ use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::flash::{Async, Flash};
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::peripherals::{self, PIO0, USB};
+use embassy_rp::peripherals::{self, PIO0, SPI0, USB};
 use embassy_rp::pio::InterruptHandler as PIOInterruptHandler;
 use embassy_rp::spi::{Config as SpiConfig, Spi};
 use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
@@ -174,7 +174,11 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
     let cs = Output::new(r.cs, Level::High);
     let led = Output::new(r.led, Level::Low);
 
-    let mut serprog = serprog::Serprog::new(spi, cs, led);
+    let set_freq_cb = move |spi: &mut Spi<'_, SPI0, embassy_rp::spi::Async>, freq| {
+        spi.set_frequency(freq);
+    };
+
+    let mut serprog = serprog::Serprog::new(spi, cs, led, Some(set_freq_cb));
     let mut buf = [0; 64];
 
     loop {

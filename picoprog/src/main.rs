@@ -157,7 +157,7 @@ async fn logger_task(class: CdcAcmClass<'static, CustomUsbDriver>) {
 }
 
 #[embassy_executor::task]
-async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiResources) -> ! {
+async fn serprog_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiResources) -> ! {
     let mut config = SpiConfig::default();
     config.frequency = 12_000_000; // 12 MHz
 
@@ -177,18 +177,8 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
         spi.set_frequency(freq);
     };
 
-    let mut serprog = serprog::Serprog::new(spi, cs, led, Some(set_freq_cb));
-    let mut buf = [0; 64];
-
-    loop {
-        class.wait_connection().await;
-        if let Err(e) = class.read_packet(&mut buf).await {
-            log::error!("Error reading packet: {:?}", e);
-            continue;
-        }
-        let cmd = serprog::SerprogCommand::try_from(buf[0]).unwrap_or(serprog::SerprogCommand::Nop);
-        serprog.handle_command(cmd, &mut class, &mut buf).await;
-    }
+    let serprog = serprog::Serprog::new(spi, cs, led, class, Some(set_freq_cb));
+    serprog.run_loop().await
 }
 
 #[panic_handler]

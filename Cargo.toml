@@ -19,10 +19,10 @@ embassy-sync = "0.6.2"
 embassy-time = "0.4.0"
 embassy-usb = { version = "0.4.0", features = ["max-handler-count-6", "max-interface-count-6"] }
 embassy-usb-logger = "0.4.0"
-futures = { version = "0.3.30", default-features = false, features = ["async-await", "cfg-target-has-atomic", "unstable"] }
+futures = { version = "0.3.31", default-features = false, features = ["async-await", "cfg-target-has-atomic", "unstable"] }
 heapless = { version = "0.8.0", features = ["portable-atomic-critical-section", "ufmt"] }
-log = "0.4.22"
-portable-atomic = { version = "1.6.0", features = ["critical-section"] }
+log = "0.4.26"
+portable-atomic = { version = "1.11.0", features = ["critical-section"] }
 static_cell = "2.1.0"
 ufmt = "0.2.0"
 zerocopy = { version = "0.8", features = ["derive"] }
@@ -30,13 +30,13 @@ tock-registers = "0.9.0"
 num_enum = { version = "0.7.3", default-features = false }
 
 [patch.crates-io]
-embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "556cc57c1fdc9eba0703ccc2281d39462d2d2c38" }
-embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "556cc57c1fdc9eba0703ccc2281d39462d2d2c38" }
-embassy-rp = { git = "https://github.com/embassy-rs/embassy", rev = "556cc57c1fdc9eba0703ccc2281d39462d2d2c38" }
-embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "556cc57c1fdc9eba0703ccc2281d39462d2d2c38" }
-embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "556cc57c1fdc9eba0703ccc2281d39462d2d2c38" }
-embassy-usb = { git = "https://github.com/embassy-rs/embassy", rev = "556cc57c1fdc9eba0703ccc2281d39462d2d2c38" }
-embassy-usb-logger = { git = "https://github.com/embassy-rs/embassy", rev = "556cc57c1fdc9eba0703ccc2281d39462d2d2c38" }
+embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "17301c00e986c5b8536435ea31ebf5aaf13aed17" }
+embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "17301c00e986c5b8536435ea31ebf5aaf13aed17" }
+embassy-rp = { git = "https://github.com/embassy-rs/embassy", rev = "17301c00e986c5b8536435ea31ebf5aaf13aed17" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "17301c00e986c5b8536435ea31ebf5aaf13aed17" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "17301c00e986c5b8536435ea31ebf5aaf13aed17" }
+embassy-usb = { git = "https://github.com/embassy-rs/embassy", rev = "17301c00e986c5b8536435ea31ebf5aaf13aed17" }
+embassy-usb-logger = { git = "https://github.com/embassy-rs/embassy", rev = "17301c00e986c5b8536435ea31ebf5aaf13aed17" }
 
 [profile.release]
 debug = true

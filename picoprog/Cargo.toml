@@ -7,19 +7,21 @@ authors = ["Marvin Drees <marvin.drees@9elements.com>"]
 
 [dependencies]
 assign-resources.workspace = true
-cortex-m = { workspace = true, features = ["inline-asm", "critical-section"] }
+cortex-m = { workspace = true, features = ["critical-section", "inline-asm"] }
 cortex-m-rt.workspace = true
-embassy-executor = { workspace = true, features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "nightly"] }
+embassy-executor = { workspace = true, features = ["arch-cortex-m", "executor-interrupt", "executor-thread", "nightly"] }
 embassy-futures.workspace = true
-embedded-hal.workspace = true
-embedded-hal-async.workspace = true
-serprog.workspace = true
-embassy-rp = { workspace = true, features = ["unstable-pac", "time-driver", "critical-section-impl", "rom-func-cache", "rom-v2-intrinsics", "rp2040"] }
+embassy-rp = { workspace = true, features = ["critical-section-impl", "rom-func-cache", "rom-v2-intrinsics", "rp2040", "time-driver", "unstable-pac"] }
 embassy-sync.workspace = true
 embassy-time.workspace = true
-embassy-usb = { workspace = true, features = ["max-handler-count-6", "max-interface-count-6"] }
+embassy-usb = { workspace = true, features = ["max-handler-count-2", "max-interface-count-2"] }
 embassy-usb-logger.workspace = true
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+futures = { workspace = true, default-features = false, features = ["async-await", "cfg-target-has-atomic", "unstable"] }
 heapless = { workspace = true, features = ["portable-atomic-critical-section", "ufmt"] }
 log.workspace = true
+portable-atomic = { workspace = true, features = ["critical-section"] }
+serprog.workspace = true
 static_cell.workspace = true
 ufmt.workspace = true

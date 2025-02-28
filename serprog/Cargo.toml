@@ -6,9 +6,10 @@ license = "Apache-2.0"
 
 [dependencies]
 embassy-usb.workspace = true
-embedded-hal.workspace = true
 embedded-hal-async.workspace = true
+embedded-hal.workspace = true
+futures = { workspace = true, default-features = false, features = ["async-await", "unstable"] }
 log.workspace = true
-num_enum.workspace = true
+num_enum = { workspace = true, default-features = false }
 tock-registers.workspace = true
-zerocopy.workspace = true
+zerocopy = { workspace = true, features = ["derive"] }

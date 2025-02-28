@@ -1,0 +1,9 @@
+[target.thumbv8m.main-none-eabihf]
+linker = "flip-link"
+runner = 'probe-rs run --chip STM32U5A5ZJTxQ'
+
+[build]
+target = "thumbv8m.main-none-eabihf"
+
+[env]
+DEFMT_LOG = "debug"

@@ -1,0 +1,28 @@
+[package]
+name = "bluepill-prog"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = [ "Arthur Heymans <arthur@aheymans.xyz>" ]
+
+[dependencies]
+assign-resources.workspace = true
+cortex-m = { workspace = true, features = ["inline-asm", "critical-section-single-core"] }
+cortex-m-rt.workspace = true
+critical-section.workspace = true
+defmt-rtt.workspace = true
+defmt.workspace = true
+embassy-executor = { workspace = true, features = ["defmt", "arch-cortex-m", "executor-thread", "nightly"] }
+embassy-futures = { workspace = true, features = ["defmt"] }
+embassy-stm32 = { workspace = true, features = ["defmt", "stm32f103c8", "memory-x", "rt", "time-driver-any"] }
+embassy-sync = { workspace = true, features = ["defmt"] }
+embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime", "tick-hz-32_768"] }
+embassy-usb = { workspace = true, features = ["defmt"] }
+futures.workspace = true
+heapless = { workspace = true, features = ["defmt-03", "portable-atomic", "portable-atomic-critical-section", "ufmt"] }
+panic-probe.workspace = true
+portable-atomic.workspace = true
+serprog.workspace = true
+static_cell.workspace = true
+stm32-fmc = { workspace = true, features = ["defmt"] }
+ufmt.workspace = true

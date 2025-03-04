@@ -5,11 +5,11 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-embassy-usb.workspace = true
-embedded-hal-async.workspace = true
-embedded-hal.workspace = true
+embassy-usb = { workspace = true, features = ["defmt"] }
+embedded-hal-async = { workspace = true, features = ["defmt-03"] }
+embedded-hal = { workspace = true, features = ["defmt-03"] }
+defmt.workspace = true
 futures = { workspace = true, default-features = false, features = ["async-await", "unstable"] }
-log.workspace = true
 num_enum = { workspace = true, default-features = false }
 tock-registers.workspace = true
 zerocopy = { workspace = true, features = ["derive"] }

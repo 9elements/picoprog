@@ -9,18 +9,19 @@ authors = ["Marvin Drees <marvin.drees@9elements.com>"]
 assign-resources.workspace = true
 cortex-m = { workspace = true, features = ["critical-section", "inline-asm"] }
 cortex-m-rt.workspace = true
-embassy-executor = { workspace = true, features = ["arch-cortex-m", "executor-interrupt", "executor-thread", "nightly"] }
+defmt.workspace = true
+defmt-rtt.workspace = true
+embassy-executor = { workspace = true, features = ["arch-cortex-m", "defmt", "executor-interrupt", "executor-thread", "nightly"] }
 embassy-futures.workspace = true
-embassy-rp = { workspace = true, features = ["critical-section-impl", "rom-func-cache", "rom-v2-intrinsics", "rp2040", "time-driver", "unstable-pac"] }
-embassy-sync.workspace = true
-embassy-time.workspace = true
-embassy-usb = { workspace = true, features = ["max-handler-count-2", "max-interface-count-2"] }
-embassy-usb-logger.workspace = true
-embedded-hal.workspace = true
-embedded-hal-async.workspace = true
+embassy-rp = { workspace = true, features = ["critical-section-impl", "defmt", "rom-func-cache", "rom-v2-intrinsics", "rp2040", "time-driver", "unstable-pac"] }
+embassy-sync = { workspace = true, features = ["defmt"] }
+embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-usb = { workspace = true, features = ["defmt"] }
+embedded-hal = { workspace = true, features = ["defmt-03"] }
+embedded-hal-async = { workspace = true, features = ["defmt-03"] }
 futures = { workspace = true, default-features = false, features = ["async-await", "cfg-target-has-atomic", "unstable"] }
 heapless = { workspace = true, features = ["portable-atomic-critical-section", "ufmt"] }
-log.workspace = true
+panic-probe = { workspace = true, features = ["print-defmt"] }
 portable-atomic = { workspace = true, features = ["critical-section"] }
 serprog.workspace = true
 static_cell.workspace = true

@@ -6,23 +6,23 @@
 #![feature(type_alias_impl_trait)]
 
 use assign_resources::assign_resources;
-use core::panic::PanicInfo;
-use cortex_m::peripheral::SCB;
+use defmt::*;
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
-use embassy_rp::flash::{Async, Flash};
+use embassy_rp::flash::{Async as AsyncFlash, Flash};
 use embassy_rp::gpio::{Level, Output};
+use embassy_rp::init;
 use embassy_rp::peripherals::{self, PIO0, SPI0, USB};
 use embassy_rp::pio::InterruptHandler as PIOInterruptHandler;
-use embassy_rp::spi::{Config as SpiConfig, Spi};
+use embassy_rp::spi::{Async as AsyncSpi, Config as SpiConfig, Spi};
 use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
-use embassy_usb::{Config as UsbConfig, UsbDevice};
-use embassy_usb_logger::with_class;
+use embassy_usb::Config as UsbConfig;
 use heapless::String;
 use static_cell::StaticCell;
 use ufmt::uwrite;
+use {defmt_rtt as _, panic_probe as _};
 
 mod uart;
 
@@ -55,11 +55,12 @@ const FLASH_SIZE: usize = 2 * 1024 * 1024;
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_rp::init(Default::default());
+    let p = init(Default::default());
     let r = split_resources!(p);
     let driver = Driver::new(p.USB, Irqs);
 
-    let mut flash = Flash::<_, Async, FLASH_SIZE>::new(p.FLASH, p.DMA_CH4);
+    debug!("Reading unique ID from flash");
+    let mut flash = Flash::<_, AsyncFlash, FLASH_SIZE>::new(p.FLASH, p.DMA_CH4);
     let mut uid: [u8; 8] = [0; 8];
     flash.blocking_unique_id(&mut uid).unwrap_or_default();
 
@@ -68,6 +69,7 @@ async fn main(spawner: Spawner) {
     for byte in uid.iter() {
         uwrite!(uid_str, "{:02X}", *byte).unwrap_or_default();
     }
+    debug!("UID: {}", uid_str.as_str());
 
     let config = {
         let mut config = UsbConfig::new(0x1ced, 0xc0fe);
@@ -102,12 +104,6 @@ async fn main(spawner: Spawner) {
         builder
     };
 
-    let logger_class = {
-        static STATE: StaticCell<State> = StaticCell::new();
-        let state = STATE.init(State::new());
-        CdcAcmClass::new(&mut builder, state, 64)
-    };
-
     let uart_class = {
         static STATE: StaticCell<State> = StaticCell::new();
         let state = STATE.init(State::new());
@@ -120,40 +116,26 @@ async fn main(spawner: Spawner) {
         CdcAcmClass::new(&mut builder, state, 64)
     };
 
-    let usb = builder.build();
+    debug!("Starting USB stack");
     // We can't really recover here so just unwrap
-    spawner.spawn(usb_task(usb)).unwrap();
-    spawner.spawn(logger_task(logger_class)).unwrap();
     spawner.spawn(uart::uart_task(uart_class, r.uart)).unwrap();
     spawner.spawn(serprog_task(serprog_class, r.spi)).unwrap();
 
-    loop {
-        embassy_time::Timer::after(embassy_time::Duration::from_secs(1)).await;
-    }
+    let mut usb = builder.build();
+    usb.run().await;
 }
 
 type CustomUsbDriver = Driver<'static, USB>;
-type CustomUsbDevice = UsbDevice<'static, CustomUsbDriver>;
 
 struct Disconnected {}
 
 impl From<EndpointError> for Disconnected {
     fn from(val: EndpointError) -> Self {
         match val {
-            EndpointError::BufferOverflow => panic!("USB buffer overflow"),
+            EndpointError::BufferOverflow => defmt::panic!("Buffer overflow"),
             EndpointError::Disabled => Disconnected {},
         }
     }
-}
-
-#[embassy_executor::task]
-async fn usb_task(mut usb: CustomUsbDevice) -> ! {
-    usb.run().await
-}
-
-#[embassy_executor::task]
-async fn logger_task(class: CdcAcmClass<'static, CustomUsbDriver>) {
-    with_class!(1024, log::LevelFilter::Info, class).await
 }
 
 #[embassy_executor::task]
@@ -173,19 +155,10 @@ async fn serprog_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiResour
     let cs = Output::new(r.cs, Level::High);
     let led = Output::new(r.led, Level::Low);
 
-    let set_freq_cb = move |spi: &mut Spi<'_, SPI0, embassy_rp::spi::Async>, freq| {
+    let set_freq_cb = move |spi: &mut Spi<'_, SPI0, AsyncSpi>, freq| {
         spi.set_frequency(freq);
     };
 
     let serprog = serprog::Serprog::new(spi, cs, led, class, Some(set_freq_cb));
     serprog.run_loop().await
-}
-
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    // Print out the panic info
-    log::error!("Panic occurred: {:?}", info);
-
-    // Reboot the system
-    SCB::sys_reset();
 }

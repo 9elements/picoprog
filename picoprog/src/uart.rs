@@ -1,3 +1,4 @@
+use defmt::*;
 use embassy_futures::join::join;
 use embassy_rp::peripherals::USB;
 use embassy_rp::pio::{Instance as PioInstance, Pio};
@@ -16,7 +17,7 @@ pub struct Disconnected {}
 impl From<EndpointError> for Disconnected {
     fn from(val: EndpointError) -> Self {
         match val {
-            EndpointError::BufferOverflow => panic!("USB buffer overflow"),
+            EndpointError::BufferOverflow => defmt::panic!("Buffer overflow"),
             EndpointError::Disabled => Disconnected {},
         }
     }
@@ -48,16 +49,16 @@ pub async fn uart_task(class: CdcAcmClass<'static, Driver<'static, USB>>, r: Uar
     // Read + write from USB
     let usb_future = async {
         loop {
-            log::debug!("[UART]: Wait for USB connection");
+            debug!("[UART]: Wait for USB connection");
             usb_rx.wait_connection().await;
-            log::debug!("[UART]: USB Connected");
+            debug!("[UART]: USB Connected");
             let _baud = usb_rx.line_coding().data_rate(); // TODO: Make use of this in the PIO program
             let _ = join(
                 usb_read(&mut usb_rx, &mut uart_pipe_writer),
                 usb_write(&mut usb_tx, &mut usb_pipe_reader),
             )
             .await;
-            log::debug!("[UART]: USB Disconnected");
+            debug!("[UART]: USB Disconnected");
         }
     };
 
@@ -79,7 +80,7 @@ async fn usb_read<'d, T: UsbInstance + 'd>(
     loop {
         let n = usb_rx.read_packet(&mut buf).await?;
         let data = &buf[..n];
-        log::debug!("[UART]: USB IN: {:?}", data);
+        debug!("[UART]: USB IN: {:?}", data);
         (*uart_pipe_writer).write(data).await;
     }
 }
@@ -93,7 +94,7 @@ async fn usb_write<'d, T: UsbInstance + 'd>(
     loop {
         let n = (*usb_pipe_reader).read(&mut buf).await;
         let data = &buf[..n];
-        log::debug!("[UART]: USB OUT: {:?}", data);
+        debug!("[UART]: USB OUT: {:?}", data);
         usb_tx.write_packet(data).await?;
     }
 }
@@ -106,7 +107,7 @@ async fn uart_read<PIO: PioInstance, const SM: usize>(
     loop {
         let byte = uart_rx.read_u8().await;
         let data = &[byte];
-        log::debug!("[UART]: UART IN: {:?}", data);
+        debug!("[UART]: UART IN: {:?}", data);
         (*usb_pipe_writer).write(data).await;
     }
 }
@@ -120,7 +121,7 @@ async fn uart_write<PIO: PioInstance, const SM: usize>(
     loop {
         let n = (*uart_pipe_reader).read(&mut buf).await;
         let data = &buf[..n];
-        log::debug!("[UART]: UART OUT: {:?}", data);
+        debug!("[UART]: UART OUT: {:?}", data);
         for &byte in data {
             uart_tx.write_u8(byte).await;
         }

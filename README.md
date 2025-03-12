@@ -1,6 +1,6 @@
 # Picoprog
 
-Picoprog is a firmware for the Raspberry Pi Pico that provides a USB-to-serial and USB-to-SPI bridge. It allows you to communicate with UART and SPI peripherals via USB.
+Picoprog is a firmware for the Raspberry Pi Pico and STM32 BluePill boards that provides a USB-to-serial and USB-to-SPI bridge. It allows you to communicate with UART and SPI peripherals via USB.
 
 ## Prerequisites
 
@@ -28,15 +28,26 @@ git clone https://github.com/9elements/picoprog.git
 cd picoprog
 ```
 
-2. Build the firmware:
+2. Build the firmware for your target device:
 
+For Raspberry Pi Pico:
 ```sh
 cargo run --release
 ```
 
-3. The compiled binary will be located in the `target/thumbv6m-none-eabi/release` directory.
+For STM32 BluePill:
+```sh
+cd bluepill-prog
+cargo run --release
+```
+
+3. The compiled binary will be located in:
+   - Pico: `target/thumbv6m-none-eabi/release` directory
+   - BluePill: `target/thumbv7m-none-eabi/release` directory
 
 ## Flashing the Firmware
+
+### Raspberry Pi Pico
 
 To flash the firmware onto the Raspberry Pi Pico, follow these steps:
 
@@ -53,6 +64,21 @@ cp target/thumbv6m-none-eabi/release/picoprog.uf2 /Volumes/RPI-RP2/
 ```
 
 3. The Pico will automatically reboot and start running the new firmware.
+
+### STM32 BluePill
+
+To flash the firmware onto the STM32 BluePill, you'll need an ST-Link programmer or similar:
+
+1. Connect the ST-Link to the BluePill's SWD pins (SWDIO, SWCLK, GND, 3.3V).
+
+2. Have probe-rs installed
+
+3. Use probe-rs with cargo
+```sh
+cd bluepill-prog
+cargo run --release
+```
+
 
 ## Usage
 

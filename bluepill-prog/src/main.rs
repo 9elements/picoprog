@@ -180,15 +180,16 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
     let cs = Output::new(r.cs, Level::High, Speed::Low);
     let led = Output::new(r.led, Level::Low, Speed::Low);
 
+    // Define a callback function to set the SPI frequency
+    let set_freq_cb = move |spi: &mut Spi<'_, embassy_stm32::mode::Async>, freq| {
+        let mut config = SpiConfig::default();
+        config.frequency = Hertz(freq);
+        let _ = spi.set_config(&config);
+    };
+
     loop {
         class.wait_connection().await;
-        let serprog = serprog::Serprog::new(
-            spi,
-            cs,
-            led,
-            class,
-            None::<fn(&mut Spi<'_, embassy_stm32::mode::Async>, u32)>,
-        );
+        let serprog = serprog::Serprog::new(spi, cs, led, class, Some(set_freq_cb));
         serprog.run_loop().await
     }
 }

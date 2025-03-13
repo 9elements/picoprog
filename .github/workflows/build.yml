@@ -56,9 +56,23 @@ jobs:
           rustup default nightly
           sudo apt update && sudo apt install -y libudev-dev
           cargo install flip-link elf2uf2-rs
-      - name: Build
-        run: cargo run --verbose --release
+      - name: Build Picoprog
+        run: |
+          cd picoprog
+          cargo build --verbose --release
+      - name: Build Bluepill-prog
+        run: |
+          cd bluepill-prog
+          cargo build --verbose --release
+      - name: Generate UF2 for Picoprog
+        run: |
+          cd picoprog
+          elf2uf2-rs target/thumbv6m-none-eabi/release/picoprog
       - uses: actions/upload-artifact@v4
         with:
           name: Picoprog-Image-${{ matrix.commit }}
-          path: target/thumbv6m-none-eabi/release/picoprog.uf2
+          path: picoprog/target/thumbv6m-none-eabi/release/picoprog.uf2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Bluepill-Image-${{ matrix.commit }}
+          path: bluepill-prog/target/thumbv7m-none-eabi/release/bluepill-prog

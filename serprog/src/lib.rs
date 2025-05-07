@@ -305,23 +305,13 @@ where
             }
             SerprogCommand::OSpiOp => {
                 debug!("Received OSpiOp CMD");
-                let mut sdata = [0_u8; MAX_BUFFER_SIZE + 6];
-                if let Err(e) = self.transport.read(sdata.as_mut_slice()).await {
+                let mut spi_data = [0_u8; MAX_BUFFER_SIZE * 2 + 6]; // Use twice the size for read and write
+                if let Err(e) = self.transport.read(&mut spi_data).await {
                     error!("Error reading packet: {:?}", e);
                     return;
                 }
-                let op_slen = le_u24_to_u32(&sdata[0..3]) as usize;
-                let op_rlen = le_u24_to_u32(&sdata[3..6]) as usize;
-
-                let mut rdata = [0_u8; MAX_BUFFER_SIZE];
-
-                let sdata = &sdata.as_slice()[6..6 + op_slen];
-
-                debug!(
-                    "Starting SPI transfer, sdata: {:?}, rdata: {:?}",
-                    &sdata[..op_slen as usize],
-                    &rdata[..op_rlen as usize]
-                );
+                let op_slen = le_u24_to_u32(&spi_data[0..3]) as usize;
+                let op_rlen = le_u24_to_u32(&spi_data[3..6]) as usize;
 
                 // This call is blocking according to the SPI HAL
                 if (self.spi.flush().await).is_err() {
@@ -332,28 +322,26 @@ where
                     error!("Error setting CS low");
                 }
 
-                match self.spi.write(&sdata[..op_slen as usize]).await {
+                let spi_data = &mut spi_data[6..][..op_rlen + op_slen];
+
+                match self
+                    .spi
+                    .transfer_in_place(spi_data)
+                    .await
+                {
                     Ok(_) => {
                         debug!("SPI transfer successful");
-                        debug!("Received data (rdata): {:?}", &rdata[..op_rlen as usize]);
-                        match self.spi.read(&mut rdata[..op_rlen as usize]).await {
-                            Ok(_) => {
-                                debug!("SPI read successful");
-                                debug!("Received data (rdata): {:?}", &rdata[..op_rlen as usize]);
-                                if let Err(e) = self.transport.write(&[S_ACK]).await {
-                                    error!("Error writing packet: {:?}", e);
-                                }
-
-                                // Send the full rdata in chunks
-                                let _ = self.transport.write(&rdata[..op_rlen as usize]).await;
-                            }
-                            Err(_) => {
-                                error!("SPI read error");
-                                if let Err(e) = self.transport.write(&[S_NAK]).await {
-                                    error!("Error writing NAK: {:?}", e);
-                                }
-                            }
+                        if let Err(e) = self.transport.write(&[S_ACK]).await {
+                            error!("Error writing packet: {:?}", e);
                         }
+                        // Embedded HAL says "Implementations are allowed to return before
+                        // the operation is complete" so flush here.
+                        if (self.spi.flush().await).is_err() {
+                            error!("Error flushing SPI");
+                        }
+                        let rdata = &spi_data[op_slen..];
+                        // Send the full rdata in chunks
+                        let _ = self.transport.write(rdata).await;
                     }
                     Err(_) => {
                         error!("SPI transfer error");

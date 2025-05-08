@@ -11,9 +11,21 @@ use transport::Transport;
 use zerocopy::byteorder::little_endian::{U16, U32};
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, Unaligned};
 
-use defmt::{debug, error};
+use defmt::{debug, error, Format};
 
 pub mod transport;
+
+#[derive(Format)]
+pub enum SerprogError {
+    TransportRead(&'static str),
+    TransportWrite(&'static str),
+    SpiTransfer(&'static str),
+    SpiFlush(&'static str),
+    CsSetLow(&'static str),
+    CsSetHigh(&'static str),
+    LedSetLow(&'static str),
+    LedSetHigh(&'static str),
+}
 
 // Convert 3 bytes in little-endian format to u32
 fn le_u24_to_u32(bytes: &[u8]) -> u32 {
@@ -213,17 +225,19 @@ where
         let mut buf = [0; 1];
 
         loop {
-            if let Err(e) = self.transport.read(&mut buf).await {
-                error!("Read error: {:?}", e);
+            if self.transport.read(&mut buf).await.is_err() {
+                error!("Read error in main loop");
                 continue;
             }
 
             let cmd = SerprogCommand::try_from(buf[0]).unwrap_or(SerprogCommand::Nop);
-            self.handle_command(cmd).await;
+            if let Err(e) = self.handle_command(cmd).await {
+                error!("Command error: {:?}", e);
+            }
         }
     }
 
-    async fn handle_command(&mut self, cmd: SerprogCommand)
+    async fn handle_command(&mut self, cmd: SerprogCommand) -> Result<(), SerprogError>
     where
         CS::Error: core::fmt::Debug,
         LED::Error: core::fmt::Debug,
@@ -231,9 +245,11 @@ where
         match cmd {
             SerprogCommand::Nop => {
                 debug!("Received Nop CMD");
-                if let Err(e) = self.transport.write(&[S_ACK]).await {
-                    error!("Error writing packet: {:?}", e);
-                }
+                self.transport
+                    .write(&[S_ACK])
+                    .await
+                    .map_err(|_| SerprogError::TransportWrite("Error writing ACK"))?;
+                Ok(())
             }
             SerprogCommand::QIface => {
                 debug!("Received QIface CMD");
@@ -241,127 +257,148 @@ where
                     ack: S_ACK,
                     version: U16::new(1),
                 };
-                if let Err(e) = self.transport.write(response.as_bytes()).await {
-                    error!("Error writing packet: {:?}", e);
-                }
+                self.transport
+                    .write(response.as_bytes())
+                    .await
+                    .map_err(|_| SerprogError::TransportWrite("Error writing QIface response"))?;
+                Ok(())
             }
             SerprogCommand::QCmdMap => {
                 debug!("Received QCmdMap CMD");
                 let response = QCmdMapResponse::new(self.freq_callback.is_some());
-                if let Err(e) = self.transport.write(response.as_bytes()).await {
-                    error!("Error writing packet: {:?}", e);
-                }
+                self.transport
+                    .write(response.as_bytes())
+                    .await
+                    .map_err(|_| SerprogError::TransportWrite("Error writing QCmdMap response"))?;
+                Ok(())
             }
             SerprogCommand::QPgmName => {
                 debug!("Received QPgmName CMD");
                 let response = QPgmNameResponse::new("Picoprog");
-                if let Err(e) = self.transport.write(response.as_bytes()).await {
-                    error!("Error writing packet: {:?}", e);
-                }
+                self.transport
+                    .write(response.as_bytes())
+                    .await
+                    .map_err(|_| SerprogError::TransportWrite("Error writing QPgmName response"))?;
+                Ok(())
             }
             SerprogCommand::QSerBuf => {
                 debug!("Received QSerBuf CMD");
-                if let Err(e) = self.transport.write(&[S_ACK, 0xFF, 0xFF]).await {
-                    error!("Error writing packet: {:?}", e);
-                }
+                self.transport
+                    .write(&[S_ACK, 0xFF, 0xFF])
+                    .await
+                    .map_err(|_| SerprogError::TransportWrite("Error writing QSerBuf response"))?;
+                Ok(())
             }
             SerprogCommand::QWrNMaxLen | SerprogCommand::QRdNMaxLen => {
                 debug!("Received QWrNMaxLen/QRdNMaxLen CMD");
                 let response = QMaxLenResponse::new(MAX_BUFFER_SIZE);
-                if let Err(e) = self.transport.write(response.as_bytes()).await {
-                    error!("Error writing packet: {:?}", e);
-                }
+                self.transport
+                    .write(response.as_bytes())
+                    .await
+                    .map_err(|_| SerprogError::TransportWrite("Error writing QMaxLen response"))?;
+                Ok(())
             }
             SerprogCommand::QBustype => {
                 debug!("Received QBustype CMD");
-                if let Err(e) = self.transport.write(&[S_ACK, 0x08]).await {
-                    error!("Error writing packet: {:?}", e);
-                }
+                self.transport
+                    .write(&[S_ACK, 0x08])
+                    .await
+                    .map_err(|_| SerprogError::TransportWrite("Error writing QBustype response"))?;
+                Ok(())
             }
             SerprogCommand::SyncNop => {
                 debug!("Received SyncNop CMD");
-                if let Err(e) = self.transport.write(&[S_NAK, S_ACK]).await {
-                    error!("Error writing packet: {:?}", e);
-                }
+                self.transport
+                    .write(&[S_NAK, S_ACK])
+                    .await
+                    .map_err(|_| SerprogError::TransportWrite("Error writing SyncNop response"))?;
+                Ok(())
             }
             SerprogCommand::SBustype => {
                 debug!("Received SBustype CMD");
                 let mut buf = [0u8; 1];
-                if let Err(e) = self.transport.read(&mut buf).await {
-                    error!("Error reading packet: {:?}", e);
-                    return;
-                }
+                self.transport
+                    .read(&mut buf)
+                    .await
+                    .map_err(|_| SerprogError::TransportRead("Error reading SBustype data"))?;
                 if buf[0] == 0x08 {
                     debug!("Received SBustype 'SPI'");
-                    if let Err(e) = self.transport.write(&[S_ACK]).await {
-                        error!("Error writing packet: {:?}", e);
-                    }
+                    self.transport
+                        .write(&[S_ACK])
+                        .await
+                        .map_err(|_| SerprogError::TransportWrite("Error writing SBustype ACK"))?;
                 } else {
                     debug!("Received unknown SBustype");
-                    if let Err(e) = self.transport.write(&[S_NAK]).await {
-                        error!("Error writing packet: {:?}", e);
-                    }
+                    self.transport
+                        .write(&[S_NAK])
+                        .await
+                        .map_err(|_| SerprogError::TransportWrite("Error writing SBustype NAK"))?;
                 }
+                Ok(())
             }
             SerprogCommand::OSpiOp => {
                 debug!("Received OSpiOp CMD");
                 let mut spi_data = [0_u8; MAX_BUFFER_SIZE * 2 + 6]; // Use twice the size for read and write
-                if let Err(e) = self.transport.read(&mut spi_data).await {
-                    error!("Error reading packet: {:?}", e);
-                    return;
-                }
+                self.transport
+                    .read(&mut spi_data)
+                    .await
+                    .map_err(|_| SerprogError::TransportRead("Error reading OSpiOp data"))?;
                 let op_slen = le_u24_to_u32(&spi_data[0..3]) as usize;
                 let op_rlen = le_u24_to_u32(&spi_data[3..6]) as usize;
 
                 // This call is blocking according to the SPI HAL
-                if (self.spi.flush().await).is_err() {
-                    error!("Error flushing SPI");
-                }
+                self.spi
+                    .flush()
+                    .await
+                    .map_err(|_| SerprogError::SpiFlush("Error flushing SPI before transfer"))?;
 
-                if self.cs.set_low().is_err() {
-                    error!("Error setting CS low");
-                }
+                self.cs
+                    .set_low()
+                    .map_err(|_| SerprogError::CsSetLow("Error setting CS low"))?;
 
                 let spi_data = &mut spi_data[6..][..op_rlen + op_slen];
 
-                match self
-                    .spi
-                    .transfer_in_place(spi_data)
-                    .await
-                {
+                match self.spi.transfer_in_place(spi_data).await {
                     Ok(_) => {
                         debug!("SPI transfer successful");
-                        if let Err(e) = self.transport.write(&[S_ACK]).await {
-                            error!("Error writing packet: {:?}", e);
-                        }
+                        self.transport.write(&[S_ACK]).await.map_err(|_| {
+                            SerprogError::TransportWrite("Error writing OSpiOp ACK")
+                        })?;
+
                         // Embedded HAL says "Implementations are allowed to return before
                         // the operation is complete" so flush here.
-                        if (self.spi.flush().await).is_err() {
-                            error!("Error flushing SPI");
-                        }
+                        self.spi.flush().await.map_err(|_| {
+                            SerprogError::SpiFlush("Error flushing SPI after transfer")
+                        })?;
+
                         let rdata = &spi_data[op_slen..];
                         // Send the full rdata in chunks
-                        let _ = self.transport.write(rdata).await;
+                        self.transport.write(rdata).await.map_err(|_| {
+                            SerprogError::TransportWrite("Error writing SPI read data")
+                        })?;
                     }
                     Err(_) => {
                         error!("SPI transfer error");
-                        if let Err(e) = self.transport.write(&[S_NAK]).await {
-                            error!("Error writing NAK: {:?}", e);
-                        }
+                        self.transport.write(&[S_NAK]).await.map_err(|_| {
+                            SerprogError::TransportWrite("Error writing OSpiOp NAK")
+                        })?;
+                        return Err(SerprogError::SpiTransfer("SPI transfer failed"));
                     }
                 }
 
-                if self.cs.set_high().is_err() {
-                    error!("Error setting CS high");
-                }
+                self.cs
+                    .set_high()
+                    .map_err(|_| SerprogError::CsSetHigh("Error setting CS high"))?;
+
+                Ok(())
             }
             SerprogCommand::SSpiFreq => {
                 debug!("Received SSpiFreq CMD");
                 let mut request = SSpiFreqRequest::new_zeroed();
-                if let Err(e) = self.transport.read(request.as_mut_bytes()).await {
-                    error!("Error reading packet: {:?}", e);
-                    return;
-                }
+                self.transport
+                    .read(request.as_mut_bytes())
+                    .await
+                    .map_err(|_| SerprogError::TransportRead("Error reading SSpiFreq data"))?;
 
                 // Parse the request using zerocopy
                 let try_freq = request.freq.get();
@@ -379,33 +416,43 @@ where
                     freq: U32::new(try_freq), // TODO can we report what the hardware has set up?
                 };
 
-                if let Err(e) = self.transport.write(response.as_bytes()).await {
-                    error!("Error writing packet: {:?}", e);
-                }
+                self.transport
+                    .write(response.as_bytes())
+                    .await
+                    .map_err(|_| SerprogError::TransportWrite("Error writing SSpiFreq response"))?;
+
+                Ok(())
             }
             SerprogCommand::SPinState => {
                 debug!("Received SPinState CMD");
                 let mut buf = [0u8; 1];
-                if let Err(e) = self.transport.read(&mut buf).await {
-                    error!("Error reading packet: {:?}", e);
-                    return;
-                }
+                self.transport
+                    .read(&mut buf)
+                    .await
+                    .map_err(|_| SerprogError::TransportRead("Error reading SPinState data"))?;
                 if buf[0] == 0 {
-                    if self.led.set_low().is_err() {
-                        error!("Error setting LED low");
-                    }
-                } else if self.led.set_high().is_err() {
-                    error!("Error setting LED high");
+                    self.led
+                        .set_low()
+                        .map_err(|_| SerprogError::LedSetLow("Error setting LED low"))?;
+                } else {
+                    self.led
+                        .set_high()
+                        .map_err(|_| SerprogError::LedSetHigh("Error setting LED high"))?;
                 }
-                if let Err(e) = self.transport.write(&[S_ACK]).await {
-                    error!("Error writing packet: {:?}", e);
-                }
+                self.transport
+                    .write(&[S_ACK])
+                    .await
+                    .map_err(|_| SerprogError::TransportWrite("Error writing SPinState ACK"))?;
+
+                Ok(())
             }
             _ => {
                 debug!("Received unknown CMD");
-                if let Err(e) = self.transport.write(&[S_NAK]).await {
-                    error!("Error writing packet: {:?}", e);
-                }
+                self.transport.write(&[S_NAK]).await.map_err(|_| {
+                    SerprogError::TransportWrite("Error writing unknown command NAK")
+                })?;
+
+                Ok(())
             }
         }
     }

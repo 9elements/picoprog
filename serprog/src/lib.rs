@@ -338,13 +338,24 @@ where
             }
             SerprogCommand::OSpiOp => {
                 debug!("Received OSpiOp CMD");
-                let mut spi_data = [0_u8; MAX_BUFFER_SIZE * 2 + 6]; // Use twice the size for read and write
+                let mut sdata = [0_u8; MAX_BUFFER_SIZE + 6];
                 self.transport
-                    .read(&mut spi_data)
+                    .read(sdata.as_mut_slice())
                     .await
                     .map_err(|_| SerprogError::TransportRead("Error reading OSpiOp data"))?;
-                let op_slen = le_u24_to_u32(&spi_data[0..3]) as usize;
-                let op_rlen = le_u24_to_u32(&spi_data[3..6]) as usize;
+
+                let op_slen = le_u24_to_u32(&sdata[0..3]) as usize;
+                let op_rlen = le_u24_to_u32(&sdata[3..6]) as usize;
+
+                let mut rdata = [0_u8; MAX_BUFFER_SIZE];
+
+                let sdata = &sdata.as_slice()[6..6 + op_slen];
+
+                debug!(
+                    "Starting SPI transfer, sdata: {:?}, rdata: {:?}",
+                    &sdata[..op_slen as usize],
+                    &rdata[..op_rlen as usize]
+                );
 
                 // This call is blocking according to the SPI HAL
                 self.spi
@@ -356,35 +367,51 @@ where
                     .set_low()
                     .map_err(|_| SerprogError::CsSetLow("Error setting CS low"))?;
 
-                let spi_data = &mut spi_data[6..][..op_rlen + op_slen];
+                let mut spi_op =
+                    async |spi: &mut SPI, transport: &mut T| -> Result<(), SerprogError> {
+                        match spi.write(&sdata[..op_slen as usize]).await {
+                            Ok(_) => {
+                                debug!("SPI transfer successful");
+                                debug!("Received data (rdata): {:?}", &rdata[..op_rlen as usize]);
+                                match spi.read(&mut rdata[..op_rlen as usize]).await {
+                                    Ok(_) => {
+                                        debug!("SPI read successful");
+                                        debug!(
+                                            "Received data (rdata): {:?}",
+                                            &rdata[..op_rlen as usize]
+                                        );
+                                        transport.write(&[S_ACK]).await.map_err(|_| {
+                                            SerprogError::TransportWrite("Error writing OSpiOp ACK")
+                                        })?;
 
-                match self.spi.transfer_in_place(spi_data).await {
-                    Ok(_) => {
-                        debug!("SPI transfer successful");
-                        self.transport.write(&[S_ACK]).await.map_err(|_| {
-                            SerprogError::TransportWrite("Error writing OSpiOp ACK")
-                        })?;
-
-                        // Embedded HAL says "Implementations are allowed to return before
-                        // the operation is complete" so flush here.
-                        self.spi.flush().await.map_err(|_| {
-                            SerprogError::SpiFlush("Error flushing SPI after transfer")
-                        })?;
-
-                        let rdata = &spi_data[op_slen..];
-                        // Send the full rdata in chunks
-                        self.transport.write(rdata).await.map_err(|_| {
-                            SerprogError::TransportWrite("Error writing SPI read data")
-                        })?;
-                    }
-                    Err(_) => {
-                        error!("SPI transfer error");
-                        self.transport.write(&[S_NAK]).await.map_err(|_| {
-                            SerprogError::TransportWrite("Error writing OSpiOp NAK")
-                        })?;
-                        return Err(SerprogError::SpiTransfer("SPI transfer failed"));
-                    }
-                }
+                                        // Send the full rdata in chunks
+                                        transport.write(&rdata[..op_rlen as usize]).await.map_err(
+                                            |_| {
+                                                SerprogError::TransportWrite(
+                                                    "Error writing SPI read data",
+                                                )
+                                            },
+                                        )?;
+                                    }
+                                    Err(_) => {
+                                        error!("SPI read error");
+                                        if let Err(e) = transport.write(&[S_NAK]).await {
+                                            error!("Error writing NAK: {:?}", e);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                error!("SPI transfer error");
+                                transport.write(&[S_NAK]).await.map_err(|_| {
+                                    SerprogError::TransportWrite("Error writing OSpiOp NAK")
+                                })?;
+                                Err(SerprogError::SpiTransfer("SPI transfer failed"))?;
+                            }
+                        }
+                        Ok(())
+                    };
+                embassy_futures::block_on(spi_op(&mut self.spi, &mut self.transport))?;
 
                 self.cs
                     .set_high()

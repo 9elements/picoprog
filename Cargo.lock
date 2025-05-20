@@ -1398,6 +1398,7 @@ name = "serprog"
 version = "0.1.0"
 dependencies = [
  "defmt",
+ "embassy-futures",
  "embassy-usb",
  "embedded-hal 1.0.0",
  "embedded-hal-async",

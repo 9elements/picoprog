@@ -70,4 +70,6 @@ jobs:
       - name: Check Code Formatting
         run: cargo fmt -- --check
       - name: Lint with Clippy
-        run: cargo clippy -- -D warnings
+        run: |
+          cd bluepill-prog && cargo clippy -- -D warnings
+          cd ../picoprog && cargo clippy -- -D warnings

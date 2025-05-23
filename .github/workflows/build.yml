@@ -66,7 +66,6 @@ jobs:
           cargo build --verbose --release
       - name: Generate UF2 for Picoprog
         run: |
-          cd picoprog
           elf2uf2-rs target/thumbv6m-none-eabi/release/picoprog
       - uses: actions/upload-artifact@v4
         with:

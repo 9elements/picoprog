@@ -8,6 +8,12 @@ use embassy_usb::class::cdc_acm::CdcAcmClass;
 use embedded_hal::digital::OutputPin;
 use embedded_hal_async::spi::SpiBus;
 
+#[cfg(feature = "usb2")]
+const BUFFER_SIZE: usize = 512;
+
+#[cfg(not(feature = "usb2"))]
+const BUFFER_SIZE: usize = 64;
+
 pub trait Transport {
     fn read(&mut self, buf: &mut [u8]) -> impl future::Future<Output = Result<(), ()>>;
     fn write(&mut self, data: &[u8]) -> impl future::Future<Output = Result<(), ()>>;
@@ -42,7 +48,7 @@ impl<SPI: SpiBus<u8>, CS, T> OSpiOpCallback<SPI, CS, T> for DefaultOSpiOpCallbac
         T: Transport,
         CS::Error: core::fmt::Debug,
     {
-        let mut sdata = [0_u8; 64];
+        let mut sdata = [0_u8; BUFFER_SIZE];
         transport
             .read(sdata.as_mut_slice())
             .await
@@ -50,29 +56,29 @@ impl<SPI: SpiBus<u8>, CS, T> OSpiOpCallback<SPI, CS, T> for DefaultOSpiOpCallbac
 
         let op_slen = crate::le_u24_to_u32(&sdata[0..3]) as usize;
         let op_rlen = crate::le_u24_to_u32(&sdata[3..6]) as usize;
-        let mut usb_rx_spi_tx_buf = [([0u8; 64], 0); 4];
-        let mut usb_rx_spi_tx_channel: Channel<'_, NoopRawMutex, ([u8; 64], usize)> =
+        let mut usb_rx_spi_tx_buf = [([0u8; BUFFER_SIZE], 0); 4];
+        let mut usb_rx_spi_tx_channel: Channel<'_, NoopRawMutex, ([u8; BUFFER_SIZE], usize)> =
             Channel::new(&mut usb_rx_spi_tx_buf);
         let (usb_rx, spi_tx) = usb_rx_spi_tx_channel.split();
 
-        let mut usb_tx_spi_rx_buf = [([0u8; 64], 0); 8];
-        let mut usb_tx_spi_rx_channel: Channel<'_, NoopRawMutex, ([u8; 64], usize)> =
+        let mut usb_tx_spi_rx_buf = [([0u8; BUFFER_SIZE], 0); 8];
+        let mut usb_tx_spi_rx_channel: Channel<'_, NoopRawMutex, ([u8; BUFFER_SIZE], usize)> =
             Channel::new(&mut usb_tx_spi_rx_buf);
         let (spi_rx, usb_tx) = usb_tx_spi_rx_channel.split();
 
         async fn usb_task<T: Transport>(
             transport: &mut T,
-            mut sender: Sender<'_, NoopRawMutex, ([u8; 64], usize)>,
+            mut sender: Sender<'_, NoopRawMutex, ([u8; BUFFER_SIZE], usize)>,
             sdata_size: usize,
             sdata_0: [u8; 64],
-            mut receiver: Receiver<'_, NoopRawMutex, ([u8; 64], usize)>,
+            mut receiver: Receiver<'_, NoopRawMutex, ([u8; BUFFER_SIZE], usize)>,
             rdata_size: usize,
         ) -> Result<(), SerprogError> {
             // First block
             let mut data_to_read = sdata_size;
             {
                 let (buf, size) = sender.send().await;
-                let block_size = data_to_read.min(64 - 6);
+                let block_size = data_to_read.min(BUFFER_SIZE - 6);
                 buf[..block_size].copy_from_slice(&sdata_0[6..6 + block_size]);
                 *size = block_size;
                 sender.send_done();
@@ -80,7 +86,7 @@ impl<SPI: SpiBus<u8>, CS, T> OSpiOpCallback<SPI, CS, T> for DefaultOSpiOpCallbac
             }
 
             while data_to_read > 0 {
-                let read_size = data_to_read.min(64);
+                let read_size = data_to_read.min(BUFFER_SIZE);
                 let (buf, size) = sender.send().await;
                 *size = read_size;
                 transport
@@ -111,9 +117,9 @@ impl<SPI: SpiBus<u8>, CS, T> OSpiOpCallback<SPI, CS, T> for DefaultOSpiOpCallbac
 
         async fn spi_task<SPI: SpiBus<u8>, CS: OutputPin>(
             spi: &mut SPI,
-            mut receiver: Receiver<'_, NoopRawMutex, ([u8; 64], usize)>,
+            mut receiver: Receiver<'_, NoopRawMutex, ([u8; BUFFER_SIZE], usize)>,
             sdata_size: usize,
-            mut sender: Sender<'_, NoopRawMutex, ([u8; 64], usize)>,
+            mut sender: Sender<'_, NoopRawMutex, ([u8; BUFFER_SIZE], usize)>,
             rdata_size: usize,
             cs: &mut CS,
         ) -> Result<(), SerprogError>
@@ -175,7 +181,7 @@ impl<'d, D: embassy_usb::driver::Driver<'d>> Transport for CdcAcmClass<'d, D> {
         let buf_len = buf.len();
 
         // Use a buffer large enough for full speed and high speed
-        let mut buffer = [0; 512];
+        let mut buffer = [0; BUFFER_SIZE];
         let mut size = 0;
         if buf_len < packet_size {
             let bytes_read = self

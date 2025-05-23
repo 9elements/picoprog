@@ -165,7 +165,14 @@ async fn serprog_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiResour
         spi.set_frequency(freq);
     };
 
-    let serprog = serprog::Serprog::new(spi, cs, led, class, Some(set_freq_cb));
+    let serprog = serprog::Serprog::new(
+        spi,
+        cs,
+        led,
+        class,
+        Some(set_freq_cb),
+        serprog::transport::DefaultOSpiOpCallback,
+    );
     serprog.run_loop().await
 }
 

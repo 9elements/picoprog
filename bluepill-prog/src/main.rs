@@ -189,7 +189,14 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
 
     loop {
         class.wait_connection().await;
-        let serprog = serprog::Serprog::new(spi, cs, led, class, Some(set_freq_cb));
+        let serprog = serprog::Serprog::new(
+            spi,
+            cs,
+            led,
+            class,
+            Some(set_freq_cb),
+            serprog::transport::DefaultOSpiOpCallback,
+        );
         serprog.run_loop().await
     }
 }

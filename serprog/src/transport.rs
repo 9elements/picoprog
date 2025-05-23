@@ -31,6 +31,20 @@ pub trait OSpiOpCallback<SPI, CS, T> {
         CS: OutputPin,
         T: Transport,
         CS::Error: core::fmt::Debug;
+
+    #[allow(async_fn_in_trait)]
+    async fn handle_multi_io_spi_op(
+        &mut self,
+        spi: &mut SPI,
+        cs: &mut CS,
+        transport: &mut T,
+    ) -> Result<(), SerprogError>
+    where
+        CS: OutputPin,
+        T: Transport,
+        CS::Error: core::fmt::Debug;
+
+    fn get_supported_multi_io_modes(&self) -> u8;
 }
 
 pub struct DefaultOSpiOpCallback;
@@ -172,6 +186,31 @@ impl<SPI: SpiBus<u8>, CS, T> OSpiOpCallback<SPI, CS, T> for DefaultOSpiOpCallbac
         usb_res?;
 
         Ok(())
+    }
+
+    async fn handle_multi_io_spi_op(
+        &mut self,
+        _spi: &mut SPI,
+        _cs: &mut CS,
+        transport: &mut T,
+    ) -> Result<(), SerprogError>
+    where
+        SPI: SpiBus<u8>,
+        CS: OutputPin,
+        T: Transport,
+        CS::Error: core::fmt::Debug,
+    {
+        // Default implementation - not supported
+        transport
+            .write(&[crate::S_NAK])
+            .await
+            .map_err(|_| crate::SerprogError::TransportWrite("Error writing MultiIOSpiOp NAK"))?;
+        Ok(())
+    }
+
+    fn get_supported_multi_io_modes(&self) -> u8 {
+        // Default implementation - no modes supported
+        0
     }
 }
 

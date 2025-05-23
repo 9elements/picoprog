@@ -158,7 +158,7 @@ register_bitfields! [u32,
 ];
 
 impl QCmdMapResponse {
-    fn new(has_freq_callback: bool) -> Self {
+    fn new(has_freq_callback: bool, has_ospi_op_callback: bool) -> Self {
         let mut response = Self {
             ack: S_ACK,
             map: [0; 4],
@@ -176,9 +176,12 @@ impl QCmdMapResponse {
             + Commands::QBustype::SET
             + Commands::SyncNop::SET
             + Commands::QRdNMaxLen::SET
-            + Commands::OSpiOp::SET
             + Commands::SBustype::SET
             + Commands::SPinState::SET;
+
+        if has_ospi_op_callback {
+            cmd_flags += Commands::OSpiOp::SET;
+        }
 
         if has_freq_callback {
             cmd_flags += Commands::SSpiFreq::SET;
@@ -200,7 +203,7 @@ pub struct Serprog<SPI, CS, LED, T: Transport, F, O> {
     led: LED,
     transport: T,
     freq_callback: Option<F>,
-    ospi_op_callback: O,
+    ospi_op_callback: Option<O>,
 }
 
 impl<SPI, CS, LED, T, F, O> Serprog<SPI, CS, LED, T, F, O>
@@ -217,7 +220,7 @@ where
         led: LED,
         transport: T,
         freq_callback: Option<F>,
-        ospi_op_callback: O,
+        ospi_op_callback: Option<O>,
     ) -> Self {
         Self {
             spi,
@@ -273,7 +276,10 @@ where
             }
             SerprogCommand::QCmdMap => {
                 debug!("Received QCmdMap CMD");
-                let response = QCmdMapResponse::new(self.freq_callback.is_some());
+                let response = QCmdMapResponse::new(
+                    self.freq_callback.is_some(),
+                    self.ospi_op_callback.is_some(),
+                );
                 self.transport
                     .write(response.as_bytes())
                     .await
@@ -346,9 +352,18 @@ where
             }
             SerprogCommand::OSpiOp => {
                 debug!("Received OSpiOp CMD");
-                self.ospi_op_callback
-                    .handle_ospi_op(&mut self.spi, &mut self.cs, &mut self.transport)
-                    .await
+                if let Some(callback) = &mut self.ospi_op_callback {
+                    callback
+                        .handle_ospi_op(&mut self.spi, &mut self.cs, &mut self.transport)
+                        .await
+                } else {
+                    debug!("OSpiOp not supported - no callback provided");
+                    self.transport
+                        .write(&[S_NAK])
+                        .await
+                        .map_err(|_| SerprogError::TransportWrite("Error writing OSpiOp NAK"))?;
+                    Ok(())
+                }
             }
             SerprogCommand::SSpiFreq => {
                 debug!("Received SSpiFreq CMD");

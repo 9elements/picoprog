@@ -195,7 +195,7 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
             led,
             class,
             Some(set_freq_cb),
-            serprog::transport::DefaultOSpiOpCallback,
+            Some(serprog::transport::DefaultOSpiOpCallback),
         );
         serprog.run_loop().await
     }

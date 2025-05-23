@@ -9,17 +9,18 @@ authors = ["Marvin Drees <marvin.drees@9elements.com>"]
 assign-resources.workspace = true
 cortex-m = { workspace = true, features = ["inline-asm", "critical-section"] }
 cortex-m-rt.workspace = true
-embassy-executor = { workspace = true, features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "nightly"] }
+embassy-executor = { workspace = true, features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "nightly", "defmt"] }
 embassy-futures.workspace = true
 embedded-hal.workspace = true
 embedded-hal-async.workspace = true
 serprog.workspace = true
 embassy-rp = { workspace = true, features = ["unstable-pac", "time-driver", "critical-section-impl", "rom-func-cache", "rom-v2-intrinsics", "rp2040"] }
-embassy-sync.workspace = true
+embassy-sync = { workspace = true, features = ["defmt"] }
 embassy-time.workspace = true
-embassy-usb = { workspace = true, features = ["max-handler-count-6", "max-interface-count-6"] }
-embassy-usb-logger.workspace = true
+embassy-usb = { workspace = true, features = ["max-handler-count-6", "max-interface-count-6", "defmt"] }
 heapless = { workspace = true, features = ["portable-atomic-critical-section", "ufmt"] }
 log.workspace = true
 static_cell.workspace = true
 ufmt.workspace = true
+defmt.workspace = true
+defmt-rtt.workspace = true

@@ -8,6 +8,7 @@
 use assign_resources::assign_resources;
 use core::panic::PanicInfo;
 use cortex_m::peripheral::SCB;
+use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::flash::{Async, Flash};
@@ -19,7 +20,6 @@ use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::{Config as UsbConfig, UsbDevice};
-use embassy_usb_logger::with_class;
 use heapless::String;
 use static_cell::StaticCell;
 use ufmt::uwrite;
@@ -102,12 +102,6 @@ async fn main(spawner: Spawner) {
         builder
     };
 
-    let logger_class = {
-        static STATE: StaticCell<State> = StaticCell::new();
-        let state = STATE.init(State::new());
-        CdcAcmClass::new(&mut builder, state, 64)
-    };
-
     let uart_class = {
         static STATE: StaticCell<State> = StaticCell::new();
         let state = STATE.init(State::new());
@@ -123,7 +117,6 @@ async fn main(spawner: Spawner) {
     let usb = builder.build();
     // We can't really recover here so just unwrap
     spawner.spawn(usb_task(usb)).unwrap();
-    spawner.spawn(logger_task(logger_class)).unwrap();
     spawner.spawn(uart::uart_task(uart_class, r.uart)).unwrap();
     spawner.spawn(serprog_task(serprog_class, r.spi)).unwrap();
 
@@ -149,11 +142,6 @@ impl From<EndpointError> for Disconnected {
 #[embassy_executor::task]
 async fn usb_task(mut usb: CustomUsbDevice) -> ! {
     usb.run().await
-}
-
-#[embassy_executor::task]
-async fn logger_task(class: CdcAcmClass<'static, CustomUsbDriver>) {
-    with_class!(1024, log::LevelFilter::Info, class).await
 }
 
 #[embassy_executor::task]

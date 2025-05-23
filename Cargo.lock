@@ -623,17 +623,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "embassy-usb-logger"
-version = "0.4.0"
-source = "git+https://github.com/embassy-rs/embassy?rev=17301c00e986c5b8536435ea31ebf5aaf13aed17#17301c00e986c5b8536435ea31ebf5aaf13aed17"
-dependencies = [
- "embassy-futures",
- "embassy-sync",
- "embassy-usb",
- "log",
-]
-
-[[package]]
 name = "embassy-usb-synopsys-otg"
 version = "0.2.0"
 source = "git+https://github.com/embassy-rs/embassy?rev=17301c00e986c5b8536435ea31ebf5aaf13aed17#17301c00e986c5b8536435ea31ebf5aaf13aed17"
@@ -1133,13 +1122,14 @@ dependencies = [
  "assign-resources",
  "cortex-m",
  "cortex-m-rt",
+ "defmt",
+ "defmt-rtt",
  "embassy-executor",
  "embassy-futures",
  "embassy-rp",
  "embassy-sync",
  "embassy-time",
  "embassy-usb",
- "embassy-usb-logger",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
  "heapless",

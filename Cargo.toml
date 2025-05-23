@@ -20,7 +20,6 @@ embassy-stm32 = { version = "0.2.0" }
 embassy-sync = "0.6.2"
 embassy-time = "0.4.0"
 embassy-usb = { version = "0.4.0", features = ["max-handler-count-6", "max-interface-count-6"] }
-embassy-usb-logger = "0.4.0"
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
 futures = { version = "0.3.31", default-features = false, features = ["async-await", "cfg-target-has-atomic", "unstable"] }
@@ -44,7 +43,6 @@ embassy-stm32 = { git = "https://github.com/embassy-rs/embassy", rev = "17301c00
 embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "17301c00e986c5b8536435ea31ebf5aaf13aed17" }
 embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "17301c00e986c5b8536435ea31ebf5aaf13aed17" }
 embassy-usb = { git = "https://github.com/embassy-rs/embassy", rev = "17301c00e986c5b8536435ea31ebf5aaf13aed17" }
-embassy-usb-logger = { git = "https://github.com/embassy-rs/embassy", rev = "17301c00e986c5b8536435ea31ebf5aaf13aed17" }
 
 [profile.release]
 debug = true

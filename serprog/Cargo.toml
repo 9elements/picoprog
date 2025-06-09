@@ -5,13 +5,16 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-embassy-usb.workspace = true
+# log.workspace = true
+defmt.workspace = true
 embassy-futures.workspace = true
 embassy-sync.workspace = true
+embassy-usb.workspace = true
 embedded-hal.workspace = true
 embedded-hal-async.workspace = true
-#log.workspace = true
-defmt.workspace = true
 num_enum.workspace = true
 tock-registers.workspace = true
 zerocopy.workspace = true
+
+[features]
+usb2 = []

@@ -1,0 +1,35 @@
+[package]
+name = "flashcrab"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Marvin Drees <marvin.drees@9elements.com>"]
+resolver = "2"
+
+[dependencies]
+assign-resources = { workspace = true }
+cortex-m = { workspace = true, features = ["inline-asm", "critical-section-single-core"] }
+cortex-m-rt = { workspace = true }
+critical-section = { workspace = true }
+defmt = { workspace = true }
+defmt-rtt = { workspace = true }
+embassy-executor = { workspace = true, features = ["defmt", "arch-cortex-m", "executor-thread", "nightly"] }
+embassy-futures = { workspace = true, features = ["defmt"] }
+embassy-stm32 = { workspace = true, features = ["defmt", "stm32u5a5zj", "memory-x", "rt", "time-driver-any"] }
+embassy-sync = { workspace = true, features = ["defmt"] }
+embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime", "tick-hz-32_768"] }
+embassy-usb = { workspace = true, features = ["defmt"] }
+panic-probe = { workspace = true, features = ["print-defmt"] }
+stm32-fmc = { workspace = true, features = ["defmt"] }
+futures = { workspace = true }
+heapless = { workspace = true, features = ["defmt-03", "portable-atomic", "portable-atomic-critical-section", "ufmt"] }
+portable-atomic = { workspace = true, features = ["critical-section"] }
+static_cell = { workspace = true }
+ufmt = { workspace = true }
+
+[dev-dependencies]
+embedded-test = { version = "0.6.1", features = ["defmt", "embassy"] }
+
+[[test]]
+name = "integration_test"
+harness = false

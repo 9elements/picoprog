@@ -155,32 +155,18 @@ impl<'d, T: embassy_stm32::ospi::Instance> MultiIOSpi for OspiWrapper<'d, T> {
 
     const MAX_TRANSACTION_SIZE: usize = 4096;
 
-    fn reset(&mut self) -> Result<(), Self::Error> {
-        // Send reset enable command
-        let reset_enable_config = TransferConfig {
-            iwidth: OspiWidth::SING,
-            instruction: Some(0x66),
-            ..Default::default()
-        };
-        self.0.blocking_command(&reset_enable_config)?;
-
-        // Send reset command
-        let reset_config = TransferConfig {
-            iwidth: OspiWidth::SING,
-            instruction: Some(0x99),
-            ..Default::default()
-        };
-        self.0.blocking_command(&reset_config)
+    async fn reset(&mut self) -> Result<(), Self::Error> {
+        Ok(())
     }
 
-    fn read(&mut self, transaction: MultiIOTransaction, buf: &mut [u8]) -> Result<(), Self::Error> {
+    async fn read(&mut self, transaction: MultiIOTransaction, buf: &mut [u8]) -> Result<(), Self::Error> {
         let config = self.build_transfer_config(transaction)?;
-        self.0.blocking_read(buf, config)
+        self.0.read(buf, config).await
     }
 
-    fn write(&mut self, transaction: MultiIOTransaction, buf: &[u8]) -> Result<(), Self::Error> {
+    async fn write(&mut self, transaction: MultiIOTransaction, buf: &[u8]) -> Result<(), Self::Error> {
         let config = self.build_transfer_config(transaction)?;
-        self.0.blocking_write(buf, config)
+        self.0.write(buf, config).await
     }
 
     fn supported_modes(&self) -> u8 {

@@ -1,4 +1,12 @@
 #![no_std]
+// disable warning for already-stabilized features.
+// Needed to pass CI, because we deny warnings.
+// We don't immediately remove them to not immediately break older nightlies.
+// When all features are stable, we'll remove them.
+#![cfg_attr(feature = "nightly", allow(stable_features, unknown_lints))]
+#![cfg_attr(feature = "nightly", feature(async_fn_in_trait, impl_trait_projections))]
+#![allow(async_fn_in_trait)]
+
 
 use core::convert::From;
 use core::result::Result::{Err, Ok};
@@ -789,7 +797,7 @@ where
                     if is_read {
                         // Read operation
                         let mut read_data = [0u8; MULTIIO_SPI_READ_DATA_SIZE];
-                        match multi_spi.read(transaction, &mut read_data[..data_len]) {
+                        match multi_spi.read(transaction, &mut read_data[..data_len]).await {
                             Ok(()) => {
                                 // Send ACK + read data
                                 self.transport.write(&[S_ACK]).await.map_err(|_| {
@@ -815,7 +823,7 @@ where
                         let write_data =
                             &header_data[write_data_start..write_data_start + data_len];
 
-                        match multi_spi.write(transaction, write_data) {
+                        match multi_spi.write(transaction, write_data).await {
                             Ok(()) => {
                                 self.transport.write(&[S_ACK]).await.map_err(|_| {
                                     SerprogError::TransportWrite("Error writing MultiIOSpiOp ACK")

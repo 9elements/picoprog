@@ -29,25 +29,25 @@ pub struct MultiIOTransaction {
 }
 
 /// Trait for Multi-IO SPI operations supporting different I/O modes
-pub trait MultiIOSpi {
+pub trait MultiIOSpi<Word: Copy + 'static = u8> {
     type Error: core::fmt::Debug;
 
     /// Maximum transaction buffer size supported by the implementation
     const MAX_TRANSACTION_SIZE: usize;
 
     /// Reset the Multi-IO SPI interface to a known state
-    fn reset(&mut self) -> Result<(), Self::Error>;
+    async fn reset(&mut self) -> Result<(), Self::Error>;
 
     /// Read data using Multi-IO SPI transaction
-    fn read(&mut self, transaction: MultiIOTransaction, buf: &mut [u8]) -> Result<(), Self::Error>;
+    async fn read(&mut self, transaction: MultiIOTransaction, buf: &mut [Word]) -> Result<(), Self::Error>;
 
     /// Write data using Multi-IO SPI transaction
-    fn write(&mut self, transaction: MultiIOTransaction, buf: &[u8]) -> Result<(), Self::Error>;
+    async fn write(&mut self, transaction: MultiIOTransaction, buf: &[Word]) -> Result<(), Self::Error>;
 
     /// Returns a bitmask of supported MultiIO modes
     /// Bit positions correspond to MultiIOMode enum values:
     /// bit 0: Single I/O (1-1-1), bit 1: Dual Output (1-1-2), etc.
-    fn supported_modes(&self) -> u8;
+    fn supported_modes(&self) -> Word;
 }
 
 /// No-operation MultiIO SPI that does nothing
@@ -67,11 +67,11 @@ impl MultiIOSpi for NoMultiIO {
 
     const MAX_TRANSACTION_SIZE: usize = 0;
 
-    fn reset(&mut self) -> Result<(), Self::Error> {
+    async fn reset(&mut self) -> Result<(), Self::Error> {
         Err(NoMultiIOError)
     }
 
-    fn read(
+    async fn read(
         &mut self,
         _transaction: MultiIOTransaction,
         _buf: &mut [u8],
@@ -79,7 +79,7 @@ impl MultiIOSpi for NoMultiIO {
         Err(NoMultiIOError)
     }
 
-    fn write(&mut self, _transaction: MultiIOTransaction, _buf: &[u8]) -> Result<(), Self::Error> {
+    async fn write(&mut self, _transaction: MultiIOTransaction, _buf: &[u8]) -> Result<(), Self::Error> {
         Err(NoMultiIOError)
     }
 

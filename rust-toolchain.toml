@@ -4,4 +4,5 @@ components = [ "rust-src", "rustfmt", "llvm-tools", "miri" ]
 targets = [
     "thumbv6m-none-eabi",
     "thumbv7m-none-eabi",
+    "thumbv8m.main-none-eabihf",
 ]

@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
+[features]
+nightly = []
+
 [dependencies]
 embassy-usb.workspace = true
 embassy-futures.workspace = true

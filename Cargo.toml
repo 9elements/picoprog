@@ -2,7 +2,8 @@
 members = [
     "bluepill-prog",
     "picoprog",
-    "serprog"
+    "serprog",
+    "flashcrab"
 ]
 resolver = "2"
 

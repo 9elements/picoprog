@@ -17,10 +17,12 @@ use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, Unaligned};
 use defmt::{debug, error, Format};
 
 pub mod cs_control;
+pub mod multi_io_spi;
 pub mod no_spi;
 pub mod transport;
 
 pub use cs_control::{CsControl, NoCs};
+pub use multi_io_spi::{Address, MultiIOMode, MultiIOSpi, MultiIOTransaction, NoMultiIO};
 pub use no_spi::NoSpi;
 
 pub trait ChangeSpiFreq {
@@ -52,17 +54,8 @@ fn le_u24_to_u32(bytes: &[u8]) -> u32 {
 const S_ACK: u8 = 0x06;
 const S_NAK: u8 = 0x15;
 const MAX_BUFFER_SIZE: usize = 16 << 20;
-
-#[derive(Debug, Eq, PartialEq, TryFromPrimitive, IntoPrimitive)]
-#[repr(u8)]
-pub enum MultiIOMode {
-    SingleIO111 = 0,
-    DualOut112 = 1,
-    DualIO122 = 2,
-    QuadOut114 = 3,
-    QuadIO144 = 4,
-    QPI444 = 5,
-}
+const MULTIIO_SPI_WRITE_SIZE: usize = 4096; // Max size for opcode + address + mode bytes + data
+const MULTIIO_SPI_READ_DATA_SIZE: usize = 4096; // Max size for read/write data
 
 #[derive(FromBytes, IntoBytes, Unaligned, Immutable)]
 #[repr(C, packed)]
@@ -259,7 +252,9 @@ impl QCmdMapResponse {
             + Commands::QRdNMaxLen::SET
             + Commands::OSpiOp::SET
             + Commands::SBustype::SET
-            + Commands::SPinState::SET;
+            + Commands::SPinState::SET
+            + Commands::QMultiIOSpiModes::SET
+            + Commands::MultiIOSpiOp::SET;
 
         if has_freq_callback {
             cmd_flags += Commands::SSpiFreq::SET;
@@ -275,23 +270,26 @@ impl QCmdMapResponse {
     }
 }
 
-pub struct Serprog<SPI, CS, LED, T: Transport> {
+pub struct Serprog<SPI, MSPI, CS, LED, T: Transport> {
     spi: Option<SPI>,
+    multi_spi: Option<MSPI>,
     cs: CS,
     led: LED,
     transport: T,
 }
 
-impl<SPI, CS, LED, T> Serprog<SPI, CS, LED, T>
+impl<SPI, MSPI, CS, LED, T> Serprog<SPI, MSPI, CS, LED, T>
 where
     SPI: SpiBus<u8> + ChangeSpiFreq,
+    MSPI: MultiIOSpi,
     CS: CsControl,
     LED: OutputPin,
     T: Transport,
 {
-    pub fn new(spi: Option<SPI>, cs: CS, led: LED, transport: T) -> Self {
+    pub fn new(spi: Option<SPI>, multi_spi: Option<MSPI>, cs: CS, led: LED, transport: T) -> Self {
         Self {
             spi,
+            multi_spi,
             cs,
             led,
             transport,
@@ -367,7 +365,20 @@ where
             }
             SerprogCommand::QWrNMaxLen | SerprogCommand::QRdNMaxLen => {
                 debug!("Received QWrNMaxLen/QRdNMaxLen CMD");
-                let response = QMaxLenResponse::new(MAX_BUFFER_SIZE);
+                
+                let mut max_size = 0;
+                
+                // Check SPI availability and use MAX_BUFFER_SIZE
+                if self.spi.is_some() {
+                    max_size = max_size.max(MAX_BUFFER_SIZE);
+                }
+                
+                // Check Multi-IO SPI availability and use its max transaction size
+                if self.multi_spi.is_some() {
+                    max_size = max_size.max(MSPI::MAX_TRANSACTION_SIZE);
+                }
+                
+                let response = QMaxLenResponse::new(max_size);
                 self.transport
                     .write(response.as_bytes())
                     .await
@@ -645,6 +656,183 @@ where
                             SerprogError::TransportWrite("Error writing SSpiCs NAK")
                         })?;
                     }
+                }
+                Ok(())
+            }
+            SerprogCommand::QMultiIOSpiModes => {
+                debug!("Received QMultiIOSpiModes CMD");
+
+                if let Some(ref multi_spi) = self.multi_spi {
+                    let supported_modes = multi_spi.supported_modes();
+                    let response = QMultiIOSpiModesResponse::new(supported_modes);
+                    self.transport
+                        .write(response.as_bytes())
+                        .await
+                        .map_err(|_| {
+                            SerprogError::TransportWrite("Error writing QMultiIOSpiModes response")
+                        })?;
+                } else {
+                    debug!("QMultiIOSpiModes requested but MultiIO SPI not available");
+                    self.transport.write(&[S_NAK]).await.map_err(|_| {
+                        SerprogError::TransportWrite("Error writing QMultiIOSpiModes NAK")
+                    })?;
+                }
+                Ok(())
+            }
+            SerprogCommand::MultiIOSpiOp => {
+                debug!("Received MultiIOSpiOp CMD");
+
+                if let Some(ref mut multi_spi) = self.multi_spi {
+                    let mut spi_write_buffer = [0u8; MULTIIO_SPI_WRITE_SIZE];
+
+                    // Read initial 512-byte chunk (USB transfer size)
+                    let initial_read_size = 512.min(MULTIIO_SPI_WRITE_SIZE);
+                    self.transport
+                        .read(&mut spi_write_buffer[..initial_read_size])
+                        .await
+                        .map_err(|_| {
+                            SerprogError::TransportRead("Error reading MultiIOSpiOp initial data")
+                        })?;
+
+                    // Parse header using zerocopy from the first 9 bytes
+                    let header = MultiIOSpiHeader::read_from_bytes(&spi_write_buffer[..9]).unwrap();
+
+                    // Parse header fields
+                    let io_mode_reg = LocalRegisterCopy::<u8, IOModeAndDirection::Register>::new(
+                        header.io_mode_and_direction,
+                    );
+                    let io_mode = match MultiIOMode::try_from(
+                        io_mode_reg.read(IOModeAndDirection::IOMode) as u8,
+                    ) {
+                        Ok(mode) => mode,
+                        Err(_) => {
+                            self.transport.write(&[S_NAK]).await.map_err(|_| {
+                                SerprogError::TransportWrite("Error writing MultiIOSpiOp NAK")
+                            })?;
+                            return Ok(());
+                        }
+                    };
+                    let is_read = io_mode_reg.is_set(IOModeAndDirection::ReadWrite);
+
+                    let opcode_len = header.opcode_len as usize;
+                    let addr_len = header.addr_len as usize;
+                    let mode_bytes_len = header.mode_bytes_len as usize;
+                    let dummy_cycles = header.dummy_cycles;
+                    let data_len = header.data_size.get() as usize;
+
+                    // Calculate total data size needed (header + opcode + address + mode bytes + write data)
+                    let total_data_needed = 9
+                        + opcode_len
+                        + addr_len
+                        + mode_bytes_len
+                        + if is_read { 0 } else { data_len };
+
+                    // Assert buffer size limits
+                    assert!(
+                        data_len <= MULTIIO_SPI_READ_DATA_SIZE,
+                        "MultiIO data size too large"
+                    );
+                    assert!(
+                        total_data_needed <= MULTIIO_SPI_WRITE_SIZE,
+                        "MultiIO total data too large"
+                    );
+
+                    // If we need more data than what we read initially, read the rest
+                    if total_data_needed > initial_read_size {
+                        self.transport
+                            .read(&mut spi_write_buffer[initial_read_size..total_data_needed])
+                            .await
+                            .map_err(|_| {
+                                SerprogError::TransportRead(
+                                    "Error reading MultiIOSpiOp remaining data",
+                                )
+                            })?;
+                    }
+
+                    // Use subslice for parsing the additional data (after the 9-byte header)
+                    let additional_data_size =
+                        opcode_len + addr_len + mode_bytes_len + if is_read { 0 } else { data_len };
+                    let header_data = &spi_write_buffer[9..9 + additional_data_size];
+
+                    // Parse address if present
+                    let address = if addr_len > 0 {
+                        let addr_start = opcode_len;
+                        let addr_bytes = &header_data[addr_start..addr_start + addr_len];
+                        match addr_len {
+                            3 => Some(Address::Addr24(le_u24_to_u32(addr_bytes))),
+                            4 => Some(Address::Addr32(u32::from_le_bytes([
+                                addr_bytes[0],
+                                addr_bytes[1],
+                                addr_bytes[2],
+                                addr_bytes[3],
+                            ]))),
+                            _ => {
+                                self.transport.write(&[S_NAK]).await.map_err(|_| {
+                                    SerprogError::TransportWrite("Error writing MultiIOSpiOp NAK")
+                                })?;
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    // Create transaction
+                    let transaction = MultiIOTransaction {
+                        mode: io_mode,
+                        opcode: if opcode_len > 0 { header_data[0] } else { 0 },
+                        address,
+                        mode_byte: mode_bytes_len > 0,
+                        dummy_cycles,
+                    };
+
+                    if is_read {
+                        // Read operation
+                        let mut read_data = [0u8; MULTIIO_SPI_READ_DATA_SIZE];
+                        match multi_spi.read(transaction, &mut read_data[..data_len]) {
+                            Ok(()) => {
+                                // Send ACK + read data
+                                self.transport.write(&[S_ACK]).await.map_err(|_| {
+                                    SerprogError::TransportWrite("Error writing MultiIOSpiOp ACK")
+                                })?;
+                                self.transport.write(&read_data[..data_len]).await.map_err(
+                                    |_| {
+                                        SerprogError::TransportWrite(
+                                            "Error writing MultiIOSpiOp read data",
+                                        )
+                                    },
+                                )?;
+                            }
+                            Err(_) => {
+                                self.transport.write(&[S_NAK]).await.map_err(|_| {
+                                    SerprogError::TransportWrite("Error writing MultiIOSpiOp NAK")
+                                })?;
+                            }
+                        }
+                    } else {
+                        // Write operation - data is already in header_data after opcode/address/mode bytes
+                        let write_data_start = opcode_len + addr_len + mode_bytes_len;
+                        let write_data =
+                            &header_data[write_data_start..write_data_start + data_len];
+
+                        match multi_spi.write(transaction, write_data) {
+                            Ok(()) => {
+                                self.transport.write(&[S_ACK]).await.map_err(|_| {
+                                    SerprogError::TransportWrite("Error writing MultiIOSpiOp ACK")
+                                })?;
+                            }
+                            Err(_) => {
+                                self.transport.write(&[S_NAK]).await.map_err(|_| {
+                                    SerprogError::TransportWrite("Error writing MultiIOSpiOp NAK")
+                                })?;
+                            }
+                        }
+                    }
+                } else {
+                    debug!("MultiIOSpiOp requested but MultiIO SPI not available");
+                    self.transport.write(&[S_NAK]).await.map_err(|_| {
+                        SerprogError::TransportWrite("Error writing MultiIOSpiOp NAK")
+                    })?;
                 }
                 Ok(())
             }

@@ -217,7 +217,7 @@ async fn serprog_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiResour
     let cs = Output::new(r.cs, Level::High);
     let led = Output::new(r.led, Level::Low);
 
-    let serprog = serprog::Serprog::new(spi, cs, led, class);
+    let serprog = serprog::Serprog::new(Some(spi), cs, led, class);
     serprog.run_loop().await
 }
 

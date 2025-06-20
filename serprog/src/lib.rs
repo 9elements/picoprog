@@ -16,7 +16,10 @@ use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, Unaligned};
 
 use defmt::{debug, error, Format};
 
+pub mod no_spi;
 pub mod transport;
+
+pub use no_spi::NoSpi;
 
 pub trait ChangeSpiFreq {
     const SUPPORTED: bool = false;
@@ -208,7 +211,7 @@ impl QCmdMapResponse {
 }
 
 pub struct Serprog<SPI, CS, LED, T: Transport> {
-    spi: SPI,
+    spi: Option<SPI>,
     cs: CS,
     led: LED,
     transport: T,
@@ -221,7 +224,7 @@ where
     LED: OutputPin,
     T: Transport,
 {
-    pub fn new(spi: SPI, cs: CS, led: LED, transport: T) -> Self {
+    pub fn new(spi: Option<SPI>, cs: CS, led: LED, transport: T) -> Self {
         Self {
             spi,
             cs,
@@ -347,6 +350,17 @@ where
             }
             SerprogCommand::OSpiOp => {
                 debug!("Received OSpiOp CMD");
+
+                // Check if SPI is available
+                if self.spi.is_none() {
+                    debug!("OSpiOp requested but SPI not available");
+                    self.transport
+                        .write(&[S_NAK])
+                        .await
+                        .map_err(|_| SerprogError::TransportWrite("Error writing OSpiOp NAK"))?;
+                    return Ok(());
+                }
+
                 let mut sdata = [0_u8; 64];
                 self.transport
                     .read(sdata.as_mut_slice())
@@ -453,7 +467,7 @@ where
 
                 let (spi_res, usb_res) = block_on(join(
                     spi_task(
-                        &mut self.spi,
+                        self.spi.as_mut().unwrap(), // Safe because we checked above
                         spi_tx,
                         op_slen,
                         spi_rx,
@@ -475,31 +489,50 @@ where
             }
             SerprogCommand::SSpiFreq => {
                 debug!("Received SSpiFreq CMD");
-                let mut request = SSpiFreqRequest::new_zeroed();
-                self.transport
-                    .read(request.as_mut_bytes())
-                    .await
-                    .map_err(|_| SerprogError::TransportRead("Error reading SSpiFreq data"))?;
 
-                // Parse the request using zerocopy
-                let try_freq = request.freq.get();
+                // Check if SPI is available
+                if let Some(ref mut spi) = self.spi {
+                    let mut request = SSpiFreqRequest::new_zeroed();
+                    self.transport
+                        .read(request.as_mut_bytes())
+                        .await
+                        .map_err(|_| SerprogError::TransportRead("Error reading SSpiFreq data"))?;
 
-                debug!("Setting SPI frequency: {:?}", try_freq);
+                    // Parse the request using zerocopy
+                    let try_freq = request.freq.get();
 
-                // Change frequency using the trait method
-                self.spi.change_frequency(try_freq);
+                    debug!("Setting SPI frequency: {:?}", try_freq);
 
-                // Create and send response with actual frequency
-                let actual_freq = self.spi.get_frequency();
-                let response = SSpiFreqResponse {
-                    ack: S_ACK,
-                    freq: U32::new(actual_freq),
-                };
+                    // Change frequency using the trait method
+                    spi.change_frequency(try_freq);
 
-                self.transport
-                    .write(response.as_bytes())
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing SSpiFreq response"))?;
+                    // Create and send response with actual frequency
+                    let actual_freq = spi.get_frequency();
+                    let response = SSpiFreqResponse {
+                        ack: S_ACK,
+                        freq: U32::new(actual_freq),
+                    };
+
+                    self.transport
+                        .write(response.as_bytes())
+                        .await
+                        .map_err(|_| {
+                            SerprogError::TransportWrite("Error writing SSpiFreq response")
+                        })?;
+                } else {
+                    debug!("SSpiFreq requested but SPI not available");
+                    // Still need to read the request data to keep protocol in sync
+                    let mut request = SSpiFreqRequest::new_zeroed();
+                    self.transport
+                        .read(request.as_mut_bytes())
+                        .await
+                        .map_err(|_| SerprogError::TransportRead("Error reading SSpiFreq data"))?;
+
+                    self.transport
+                        .write(&[S_NAK])
+                        .await
+                        .map_err(|_| SerprogError::TransportWrite("Error writing SSpiFreq NAK"))?;
+                }
 
                 Ok(())
             }

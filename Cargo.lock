@@ -171,6 +171,7 @@ dependencies = [
  "embassy-sync",
  "embassy-time",
  "embassy-usb",
+ "embedded-hal-async",
  "futures",
  "heapless",
  "panic-probe",

@@ -22,10 +22,69 @@ use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::{Config as UsbConfig, UsbDevice};
 use heapless::String;
+use serprog::ChangeSpiFreq;
 use static_cell::StaticCell;
 use ufmt::uwrite;
 
 use defmt::{error, info};
+
+struct StmSpi<'d> {
+    spi: Spi<'d, embassy_stm32::mode::Async>,
+    current_freq: u32,
+}
+
+impl<'d> StmSpi<'d> {
+    fn new(spi: Spi<'d, embassy_stm32::mode::Async>, freq: u32) -> Self {
+        Self {
+            spi,
+            current_freq: freq,
+        }
+    }
+}
+
+impl<'d> ChangeSpiFreq for StmSpi<'d> {
+    const SUPPORTED: bool = true;
+
+    fn change_frequency(&mut self, freq: u32) {
+        let mut config = SpiConfig::default();
+        config.frequency = Hertz(freq);
+        let _ = self.spi.set_config(&config);
+        self.current_freq = freq;
+    }
+
+    fn get_frequency(&self) -> u32 {
+        self.spi.get_current_config().frequency.0
+    }
+}
+
+impl<'d> embedded_hal_async::spi::SpiBus<u8> for StmSpi<'d> {
+    async fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+        self.spi.read(words).await
+    }
+
+    async fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
+        self.spi.write(words).await
+    }
+
+    async fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Self::Error> {
+        self.spi.transfer(read, write).await
+    }
+
+    async fn transfer_in_place(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+        self.spi.transfer_in_place(words).await
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        <Spi<'_, embassy_stm32::mode::Async> as embedded_hal_async::spi::SpiBus<u8>>::flush(
+            &mut self.spi,
+        )
+        .await
+    }
+}
+
+impl<'d> embedded_hal_async::spi::ErrorType for StmSpi<'d> {
+    type Error = embassy_stm32::spi::Error;
+}
 
 bind_interrupts!(struct Irqs {
     USB_LP_CAN1_RX0 => USBInterruptHandler<USB>;
@@ -168,7 +227,7 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
     let mut config = SpiConfig::default();
     config.frequency = Hertz(12_000_000); // 12 MHz
 
-    let spi = Spi::new(
+    let spi_raw = Spi::new(
         r.peripheral,
         r.clk,
         r.mosi,
@@ -177,19 +236,13 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
         r.miso_dma,
         config,
     );
+    let spi = StmSpi::new(spi_raw, 12_000_000);
     let cs = Output::new(r.cs, Level::High, Speed::Low);
     let led = Output::new(r.led, Level::Low, Speed::Low);
 
-    // Define a callback function to set the SPI frequency
-    let set_freq_cb = move |spi: &mut Spi<'_, embassy_stm32::mode::Async>, freq| {
-        let mut config = SpiConfig::default();
-        config.frequency = Hertz(freq);
-        let _ = spi.set_config(&config);
-    };
-
     loop {
         class.wait_connection().await;
-        let serprog = serprog::Serprog::new(spi, cs, led, class, Some(set_freq_cb));
+        let serprog = serprog::Serprog::new(spi, cs, led, class);
         serprog.run_loop().await
     }
 }

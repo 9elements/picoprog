@@ -18,6 +18,15 @@ use defmt::{debug, error, Format};
 
 pub mod transport;
 
+pub trait ChangeSpiFreq {
+    const SUPPORTED: bool = false;
+
+    fn change_frequency(&mut self, _freq: u32) {}
+    fn get_frequency(&self) -> u32 {
+        0
+    }
+}
+
 #[derive(Format)]
 pub enum SerprogError {
     TransportRead(&'static str),
@@ -198,29 +207,26 @@ impl QCmdMapResponse {
     }
 }
 
-pub struct Serprog<SPI, CS, LED, T: Transport, F> {
+pub struct Serprog<SPI, CS, LED, T: Transport> {
     spi: SPI,
     cs: CS,
     led: LED,
     transport: T,
-    freq_callback: Option<F>,
 }
 
-impl<SPI, CS, LED, T, F> Serprog<SPI, CS, LED, T, F>
+impl<SPI, CS, LED, T> Serprog<SPI, CS, LED, T>
 where
-    SPI: SpiBus<u8>,
+    SPI: SpiBus<u8> + ChangeSpiFreq,
     CS: OutputPin,
     LED: OutputPin,
     T: Transport,
-    F: FnMut(&mut SPI, u32) + Send + Sync,
 {
-    pub fn new(spi: SPI, cs: CS, led: LED, transport: T, freq_callback: Option<F>) -> Self {
+    pub fn new(spi: SPI, cs: CS, led: LED, transport: T) -> Self {
         Self {
             spi,
             cs,
             led,
             transport,
-            freq_callback,
         }
     }
 
@@ -268,7 +274,7 @@ where
             }
             SerprogCommand::QCmdMap => {
                 debug!("Received QCmdMap CMD");
-                let response = QCmdMapResponse::new(self.freq_callback.is_some());
+                let response = QCmdMapResponse::new(SPI::SUPPORTED);
                 self.transport
                     .write(response.as_bytes())
                     .await
@@ -480,15 +486,14 @@ where
 
                 debug!("Setting SPI frequency: {:?}", try_freq);
 
-                // Call the frequency callback if set
-                if let Some(callback) = &mut self.freq_callback {
-                    (callback)(&mut self.spi, try_freq);
-                }
+                // Change frequency using the trait method
+                self.spi.change_frequency(try_freq);
 
-                // Create and send response
+                // Create and send response with actual frequency
+                let actual_freq = self.spi.get_frequency();
                 let response = SSpiFreqResponse {
                     ack: S_ACK,
-                    freq: U32::new(try_freq), // TODO can we report what the hardware has set up?
+                    freq: U32::new(actual_freq),
                 };
 
                 self.transport

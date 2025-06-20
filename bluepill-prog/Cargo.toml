@@ -18,6 +18,7 @@ embassy-stm32 = { workspace = true, features = ["defmt", "stm32f103c8", "memory-
 embassy-sync = { workspace = true, features = ["defmt"] }
 embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime", "tick-hz-32_768"] }
 embassy-usb = { workspace = true, features = ["defmt"] }
+embedded-hal-async.workspace = true
 futures.workspace = true
 heapless = { workspace = true, features = ["defmt-03", "portable-atomic", "portable-atomic-critical-section", "ufmt"] }
 panic-probe.workspace = true

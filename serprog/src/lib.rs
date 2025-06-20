@@ -51,6 +51,44 @@ const S_ACK: u8 = 0x06;
 const S_NAK: u8 = 0x15;
 const MAX_BUFFER_SIZE: usize = 16 << 20;
 
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u8)]
+pub enum MultiIOMode {
+    SingleIO111 = 0,
+    DualOut112 = 1,
+    DualIO122 = 2,
+    QuadOut114 = 3,
+    QuadIO144 = 4,
+    QPI444 = 5,
+}
+
+#[derive(FromBytes, IntoBytes, Unaligned, Immutable)]
+#[repr(C, packed)]
+struct MultiIOSpiHeader {
+    io_mode_and_direction: u8, // IO mode (bits 0-6) + read/write flag (bit 7)
+    opcode_len: u8,
+    addr_len: u8,
+    mode_bytes_len: u8,
+    dummy_cycles: u8,
+    data_size: U32, // LE size of data
+}
+
+#[derive(FromBytes, IntoBytes, Unaligned, Immutable)]
+#[repr(C, packed)]
+struct QMultiIOSpiModesResponse {
+    ack: u8,
+    supported_modes: u8, // Bitmask of supported MultiIO modes
+}
+
+impl QMultiIOSpiModesResponse {
+    fn new(supported_modes: u8) -> Self {
+        Self {
+            ack: S_ACK,
+            supported_modes,
+        }
+    }
+}
+
 #[derive(FromBytes, IntoBytes, Unaligned, Immutable)]
 #[repr(C, packed)]
 struct SSpiFreqRequest {
@@ -112,29 +150,33 @@ struct QIfaceResponse {
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 pub enum SerprogCommand {
-    Nop = 0x00,        // No operation
-    QIface = 0x01,     // Query interface version
-    QCmdMap = 0x02,    // Query supported commands bitmap
-    QPgmName = 0x03,   // Query programmer name
-    QSerBuf = 0x04,    // Query Serial Buffer Size
-    QBustype = 0x05,   // Query supported bustypes
-    QChipSize = 0x06,  // Query supported chipsize (2^n format)
-    QOpBuf = 0x07,     // Query operation buffer size
-    QWrNMaxLen = 0x08, // Query Write to opbuf: Write-N maximum length
-    RByte = 0x09,      // Read a single byte
-    RNBytes = 0x0A,    // Read n bytes
-    OInit = 0x0B,      // Initialize operation buffer
-    OWriteB = 0x0C,    // Write opbuf: Write byte with address
-    OWriteN = 0x0D,    // Write to opbuf: Write-N
-    ODelay = 0x0E,     // Write opbuf: udelay
-    OExec = 0x0F,      // Execute operation buffer
-    SyncNop = 0x10,    // Special no-operation that returns NAK+ACK
-    QRdNMaxLen = 0x11, // Query read-n maximum length
-    SBustype = 0x12,   // Set used bustype(s)
-    OSpiOp = 0x13,     // Perform SPI operation
-    SSpiFreq = 0x14,   // Set SPI clock frequency
-    SPinState = 0x15,  // Enable/disable output drivers
-    SSpiCs = 0x16,     // Select Chip Select to use
+    Nop = 0x00,              // No operation
+    QIface = 0x01,           // Query interface version
+    QCmdMap = 0x02,          // Query supported commands bitmap
+    QPgmName = 0x03,         // Query programmer name
+    QSerBuf = 0x04,          // Query Serial Buffer Size
+    QBustype = 0x05,         // Query supported bustypes
+    QChipSize = 0x06,        // Query supported chipsize (2^n format)
+    QOpBuf = 0x07,           // Query operation buffer size
+    QWrNMaxLen = 0x08,       // Query Write to opbuf: Write-N maximum length
+    RByte = 0x09,            // Read a single byte
+    RNBytes = 0x0A,          // Read n bytes
+    OInit = 0x0B,            // Initialize operation buffer
+    OWriteB = 0x0C,          // Write opbuf: Write byte with address
+    OWriteN = 0x0D,          // Write to opbuf: Write-N
+    ODelay = 0x0E,           // Write opbuf: udelay
+    OExec = 0x0F,            // Execute operation buffer
+    SyncNop = 0x10,          // Special no-operation that returns NAK+ACK
+    QRdNMaxLen = 0x11,       // Query read-n maximum length
+    SBustype = 0x12,         // Set used bustype(s)
+    OSpiOp = 0x13,           // Perform SPI operation
+    SSpiFreq = 0x14,         // Set SPI clock frequency
+    SPinState = 0x15,        // Enable/disable output drivers
+    SSpiCs = 0x16,           // Select Chip Select to use
+    SSpiMode = 0x17,         // Set SPI Mode
+    SCSMode = 0x18,          // Set CS Mode
+    QMultiIOSpiModes = 0x19, // Query available Multi-IO SPI modes
+    MultiIOSpiOp = 0x1a,     // Perform Multi-IO SPI operation
 }
 
 #[derive(FromBytes, IntoBytes, Unaligned, Immutable)]
@@ -169,7 +211,28 @@ register_bitfields! [u32,
         OSpiOp OFFSET(19) NUMBITS(1) [],
         SSpiFreq OFFSET(20) NUMBITS(1) [],
         SPinState OFFSET(21) NUMBITS(1) [],
-        SSpiCs OFFSET(22) NUMBITS(1) []
+        SSpiCs OFFSET(22) NUMBITS(1) [],
+        SSpiMode OFFSET(23) NUMBITS(1) [],
+        SCSMode OFFSET(24) NUMBITS(1) [],
+        QMultiIOSpiModes OFFSET(25) NUMBITS(1) [],
+        MultiIOSpiOp OFFSET(26) NUMBITS(1) []
+    ]
+];
+
+register_bitfields! [u8,
+    IOModeAndDirection [
+        IOMode OFFSET(0) NUMBITS(7) [
+            SingleIO111 = 0,
+            DualOut112 = 1,
+            DualIO122 = 2,
+            QuadOut114 = 3,
+            QuadIO144 = 4,
+            QPI444 = 5
+        ],
+        ReadWrite OFFSET(7) NUMBITS(1) [
+            Write = 0,
+            Read = 1
+        ]
     ]
 ];
 

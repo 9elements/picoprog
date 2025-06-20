@@ -13,12 +13,12 @@ use {
     embassy_stm32::{
         bind_interrupts,
         gpio::{Level, Output, Speed},
-        mode::Blocking,
+        mode::Async,
         ospi::{
             AddressSize, Config as OspiConfig, DummyCycles, MemorySize, MemoryType, Ospi,
-            OspiWidth, TransferConfig,
+            OspiError, OspiWidth, TransferConfig,
         },
-        peripherals::{self, OCTOSPI1, USB_OTG_HS},
+        peripherals::{self, USB_OTG_HS},
         time::Hertz,
         uid::uid_hex,
         usb::{Config as UsbDrvConfig, Driver, InterruptHandler as USBInterruptHandler},
@@ -29,9 +29,8 @@ use {
         class::cdc_acm::{CdcAcmClass, State},
         Config as UsbConfig, UsbDevice,
     },
-    heapless::Vec,
     panic_probe as _,
-    serprog::{transport::Transport, NoSpi, SerprogError},
+    serprog::{Address, MultiIOMode, MultiIOSpi, MultiIOTransaction, NoCs, NoSpi},
     static_cell::StaticCell,
 };
 
@@ -55,12 +54,139 @@ assign_resources! {
         io5: PC2,
         io6: PC3,
         io7: PC0,
-        dma: GPDMA1_CH0,
+        dma: GPDMA1_CH7,
     }
     usb: UsbResources{
         peripheral: USB_OTG_HS,
         dm: PA11,
         dp: PA12,
+    }
+}
+
+// Wrapper struct to work around orphan rules
+pub struct OspiWrapper<'d, T: embassy_stm32::ospi::Instance>(Ospi<'d, T, Async>);
+
+impl<'d, T: embassy_stm32::ospi::Instance> OspiWrapper<'d, T> {
+    pub fn new(ospi: Ospi<'d, T, Async>) -> Self {
+        Self(ospi)
+    }
+
+    fn build_transfer_config(
+        &self,
+        transaction: MultiIOTransaction,
+    ) -> Result<TransferConfig, OspiError> {
+        let (iwidth, adwidth, dwidth) = match transaction.mode {
+            MultiIOMode::SingleIO111 => (OspiWidth::SING, OspiWidth::SING, OspiWidth::SING),
+            MultiIOMode::DualOut112 => (OspiWidth::SING, OspiWidth::SING, OspiWidth::DUAL),
+            MultiIOMode::DualIO122 => (OspiWidth::SING, OspiWidth::DUAL, OspiWidth::DUAL),
+            MultiIOMode::QuadOut114 => (OspiWidth::SING, OspiWidth::SING, OspiWidth::QUAD),
+            MultiIOMode::QuadIO144 => (OspiWidth::SING, OspiWidth::QUAD, OspiWidth::QUAD),
+            MultiIOMode::QPI444 => (OspiWidth::QUAD, OspiWidth::QUAD, OspiWidth::QUAD),
+        };
+
+        let (address, adsize) = match transaction.address {
+            Some(Address::Addr24(addr)) => (Some(addr), AddressSize::_24bit),
+            Some(Address::Addr32(addr)) => (Some(addr), AddressSize::_32bit),
+            None => (None, AddressSize::_24bit), // We don't care about address size
+        };
+
+        let dummy = match transaction.dummy_cycles {
+            0 => DummyCycles::_0,
+            1 => DummyCycles::_1,
+            2 => DummyCycles::_2,
+            3 => DummyCycles::_3,
+            4 => DummyCycles::_4,
+            5 => DummyCycles::_5,
+            6 => DummyCycles::_6,
+            7 => DummyCycles::_7,
+            8 => DummyCycles::_8,
+            9 => DummyCycles::_9,
+            10 => DummyCycles::_10,
+            11 => DummyCycles::_11,
+            12 => DummyCycles::_12,
+            13 => DummyCycles::_13,
+            14 => DummyCycles::_14,
+            15 => DummyCycles::_15,
+            16 => DummyCycles::_16,
+            17 => DummyCycles::_17,
+            18 => DummyCycles::_18,
+            19 => DummyCycles::_19,
+            20 => DummyCycles::_20,
+            21 => DummyCycles::_21,
+            22 => DummyCycles::_22,
+            23 => DummyCycles::_23,
+            24 => DummyCycles::_24,
+            25 => DummyCycles::_25,
+            26 => DummyCycles::_26,
+            27 => DummyCycles::_27,
+            28 => DummyCycles::_28,
+            29 => DummyCycles::_29,
+            30 => DummyCycles::_30,
+            31 => DummyCycles::_31,
+            _ => {
+                // Return an error for invalid dummy cycles
+                return Err(OspiError::InvalidCommand);
+            }
+        };
+
+        let mut config = TransferConfig {
+            iwidth,
+            instruction: Some(transaction.opcode as u32),
+            adwidth,
+            address,
+            adsize,
+            dwidth,
+            dummy,
+            ..Default::default()
+        };
+
+        // Handle mode byte if requested
+        if transaction.mode_byte {
+            config.abwidth = dwidth; // Use same width as data for alternate bytes
+            config.alternate_bytes = Some(0xff); // Mode byte value, could be parameterized
+        }
+
+        Ok(config)
+    }
+}
+
+impl<'d, T: embassy_stm32::ospi::Instance> MultiIOSpi for OspiWrapper<'d, T> {
+    type Error = OspiError;
+
+    const MAX_TRANSACTION_SIZE: usize = 4096;
+
+    fn reset(&mut self) -> Result<(), Self::Error> {
+        // Send reset enable command
+        let reset_enable_config = TransferConfig {
+            iwidth: OspiWidth::SING,
+            instruction: Some(0x66),
+            ..Default::default()
+        };
+        self.0.blocking_command(&reset_enable_config)?;
+
+        // Send reset command
+        let reset_config = TransferConfig {
+            iwidth: OspiWidth::SING,
+            instruction: Some(0x99),
+            ..Default::default()
+        };
+        self.0.blocking_command(&reset_config)
+    }
+
+    fn read(&mut self, transaction: MultiIOTransaction, buf: &mut [u8]) -> Result<(), Self::Error> {
+        let config = self.build_transfer_config(transaction)?;
+        self.0.blocking_read(buf, config)
+    }
+
+    fn write(&mut self, transaction: MultiIOTransaction, buf: &[u8]) -> Result<(), Self::Error> {
+        let config = self.build_transfer_config(transaction)?;
+        self.0.blocking_write(buf, config)
+    }
+
+    fn supported_modes(&self) -> u8 {
+        // Support Single I/O, Dual Output, Dual I/O, Quad Output, Quad I/O, QPI
+        // Bit positions correspond to MultiIOMode enum values
+        (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5)
     }
 }
 
@@ -102,7 +228,11 @@ async fn main(spawner: Spawner) {
     info!("Started Flashcrab {}", uid);
 
     let mut usb_drv_cfg = UsbDrvConfig::default();
-    usb_drv_cfg.vbus_detection = true;
+    // Do not enable vbus_detection. This is a safe default that works in all boards.
+    // However, if your USB device is self-powered (can stay powered on if USB is unplugged), you need
+    // to enable vbus_detection to comply with the USB spec. If you enable it, the board
+    // has to support it or USB won't work at all. See docs on `vbus_detection` for details.
+    usb_drv_cfg.vbus_detection = false;
     static EP_OUT_BUFFER: StaticCell<[u8; 1024]> = StaticCell::new();
     let ep_out_buffer = EP_OUT_BUFFER.init([0; 1024]);
     let driver = Driver::new_hs(
@@ -183,7 +313,7 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: OspiR
             config
         };
 
-        let ospi = Ospi::new_blocking_octospi(
+        let ospi = Ospi::new_octospi(
             r.peripheral,
             r.clk,
             r.io0,
@@ -195,14 +325,16 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: OspiR
             r.io6,
             r.io7,
             r.ncs1,
+            r.dma,
             ospi_cfg,
         );
 
         // Dummy CS and LED pins for the serprog interface
-        let cs = Output::new(r.ncs2, Level::High, Speed::VeryHigh);
+        //let cs = Output::new(r.ncs2, Level::High, Speed::VeryHigh);
         let led = Output::new(r.dqs, Level::Low, Speed::Medium); // Use DQS pin as LED
 
-        let serprog = serprog::Serprog::new(None::<NoSpi>, cs, led, class);
+        let ospi_wrapper = OspiWrapper::new(ospi);
+        let serprog = serprog::Serprog::new(None::<NoSpi>, Some(ospi_wrapper), NoCs, led, class);
 
         serprog.run_loop().await
     }

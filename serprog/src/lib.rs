@@ -365,19 +365,19 @@ where
             }
             SerprogCommand::QWrNMaxLen | SerprogCommand::QRdNMaxLen => {
                 debug!("Received QWrNMaxLen/QRdNMaxLen CMD");
-                
+
                 let mut max_size = 0;
-                
+
                 // Check SPI availability and use MAX_BUFFER_SIZE
                 if self.spi.is_some() {
                     max_size = max_size.max(MAX_BUFFER_SIZE);
                 }
-                
+
                 // Check Multi-IO SPI availability and use its max transaction size
                 if self.multi_spi.is_some() {
                     max_size = max_size.max(MSPI::MAX_TRANSACTION_SIZE);
                 }
-                
+
                 let response = QMaxLenResponse::new(max_size);
                 self.transport
                     .write(response.as_bytes())

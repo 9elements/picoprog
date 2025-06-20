@@ -2,21 +2,20 @@
 
 use core::convert::From;
 use core::result::Result::{Err, Ok};
-use embassy_futures::{block_on, join::join};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_sync::zerocopy_channel::{Channel, Receiver, Sender};
+use embassy_sync::zerocopy_channel::{Receiver, Sender};
 use embedded_hal::digital::OutputPin;
 use embedded_hal_async::spi::SpiBus;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use tock_registers::register_bitfields;
 use tock_registers::LocalRegisterCopy;
-use transport::Transport;
 use zerocopy::byteorder::little_endian::{U16, U32};
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, Unaligned};
 
 use defmt::{debug, error, Format};
 
-pub mod transport;
+pub mod usb_task;
+use usb_task::UsbCommand;
 
 #[derive(Format)]
 pub enum SerprogError {
@@ -198,46 +197,104 @@ impl QCmdMapResponse {
     }
 }
 
-pub struct Serprog<SPI, CS, LED, T: Transport, F> {
+pub struct Serprog<SPI, CS, LED, F> {
     spi: SPI,
     cs: CS,
     led: LED,
-    transport: T,
+    usb_cmd_sender: Sender<'static, NoopRawMutex, UsbCommand>,
+    usb_data_to_receiver: Receiver<'static, NoopRawMutex, Result<heapless::Vec<u8, 64>, ()>>,
     freq_callback: Option<F>,
 }
 
-impl<SPI, CS, LED, T, F> Serprog<SPI, CS, LED, T, F>
+impl<SPI, CS, LED, F> Serprog<SPI, CS, LED, F>
 where
     SPI: SpiBus<u8>,
     CS: OutputPin,
     LED: OutputPin,
-    T: Transport,
     F: FnMut(&mut SPI, u32) + Send + Sync,
 {
-    pub fn new(spi: SPI, cs: CS, led: LED, transport: T, freq_callback: Option<F>) -> Self {
+    pub fn new(
+        spi: SPI,
+        cs: CS,
+        led: LED,
+        usb_cmd_sender: Sender<'static, NoopRawMutex, UsbCommand>,
+        usb_data_to_receiver: Receiver<'static, NoopRawMutex, Result<heapless::Vec<u8, 64>, ()>>,
+        freq_callback: Option<F>,
+    ) -> Self {
         Self {
             spi,
             cs,
             led,
-            transport,
+            usb_cmd_sender,
+            usb_data_to_receiver,
             freq_callback,
         }
     }
 
     pub async fn run_loop(mut self) -> ! {
-        let mut buf = [0; 1];
-
         loop {
-            if self.transport.read(&mut buf).await.is_err() {
-                error!("Read error in main loop");
-                continue;
-            }
+            // Clear both sender and receiver to start each command from a clean sheet
+            self.usb_cmd_sender.clear();
+            self.usb_data_to_receiver.clear();
 
-            let cmd = SerprogCommand::try_from(buf[0]).unwrap_or(SerprogCommand::Nop);
+            // Request 1 byte read for command
+            let mut cmd_buf = [0u8; 1];
+            let cmd_byte = match self.usb_read(&mut cmd_buf).await {
+                Ok(()) => cmd_buf[0],
+                Err(_) => {
+                    error!("Read error in main loop");
+                    continue;
+                }
+            };
+
+            let cmd = SerprogCommand::try_from(cmd_byte).unwrap_or(SerprogCommand::Nop);
             if let Err(e) = self.handle_command(cmd).await {
                 error!("Command error: {:?}", e);
             }
         }
+    }
+
+    async fn usb_write(&mut self, data: &[u8]) -> Result<(), SerprogError> {
+        let mut usb_buf = heapless::Vec::new();
+        usb_buf
+            .resize(data.len(), 0)
+            .map_err(|_| SerprogError::TransportWrite("Buffer too small"))?;
+        usb_buf[..data.len()].copy_from_slice(data);
+
+        let cmd = self.usb_cmd_sender.send().await;
+        *cmd = UsbCommand::Write { data: usb_buf };
+        self.usb_cmd_sender.send_done();
+
+        let result = self.usb_data_to_receiver.receive().await;
+        match result {
+            Ok(_) => {
+                self.usb_data_to_receiver.receive_done();
+                Ok(())
+            }
+            Err(_) => {
+                self.usb_data_to_receiver.receive_done();
+                Err(SerprogError::TransportWrite("USB write failed"))
+            }
+        }
+    }
+
+    async fn usb_read(&mut self, buf: &mut [u8]) -> Result<(), SerprogError> {
+        let cmd = self.usb_cmd_sender.send().await;
+        *cmd = UsbCommand::Read { size: buf.len() };
+        self.usb_cmd_sender.send_done();
+
+        let result = self.usb_data_to_receiver.receive().await;
+        let data = match result {
+            Ok(data) => data,
+            Err(_) => {
+                self.usb_data_to_receiver.receive_done();
+                return Err(SerprogError::TransportRead("USB read failed"));
+            }
+        };
+        let read_size = data.len().min(buf.len());
+        buf[..read_size].copy_from_slice(&data[..read_size]);
+        self.usb_data_to_receiver.receive_done();
+        Ok(())
     }
 
     async fn handle_command(&mut self, cmd: SerprogCommand) -> Result<(), SerprogError>
@@ -248,10 +305,7 @@ where
         match cmd {
             SerprogCommand::Nop => {
                 debug!("Received Nop CMD");
-                self.transport
-                    .write(&[S_ACK])
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing ACK"))?;
+                self.usb_write(&[S_ACK]).await?;
                 Ok(())
             }
             SerprogCommand::QIface => {
@@ -260,220 +314,190 @@ where
                     ack: S_ACK,
                     version: U16::new(1),
                 };
-                self.transport
-                    .write(response.as_bytes())
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing QIface response"))?;
+                self.usb_write(response.as_bytes()).await?;
                 Ok(())
             }
             SerprogCommand::QCmdMap => {
                 debug!("Received QCmdMap CMD");
                 let response = QCmdMapResponse::new(self.freq_callback.is_some());
-                self.transport
-                    .write(response.as_bytes())
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing QCmdMap response"))?;
+                self.usb_write(response.as_bytes()).await?;
                 Ok(())
             }
             SerprogCommand::QPgmName => {
                 debug!("Received QPgmName CMD");
                 let response = QPgmNameResponse::new("Picoprog");
-                self.transport
-                    .write(response.as_bytes())
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing QPgmName response"))?;
+                self.usb_write(response.as_bytes()).await?;
                 Ok(())
             }
             SerprogCommand::QSerBuf => {
                 debug!("Received QSerBuf CMD");
-                self.transport
-                    .write(&[S_ACK, 0xFF, 0xFF])
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing QSerBuf response"))?;
+                self.usb_write(&[S_ACK, 0xFF, 0xFF]).await?;
                 Ok(())
             }
             SerprogCommand::QWrNMaxLen | SerprogCommand::QRdNMaxLen => {
                 debug!("Received QWrNMaxLen/QRdNMaxLen CMD");
                 let response = QMaxLenResponse::new(MAX_BUFFER_SIZE);
-                self.transport
-                    .write(response.as_bytes())
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing QMaxLen response"))?;
+                self.usb_write(response.as_bytes()).await?;
                 Ok(())
             }
             SerprogCommand::QBustype => {
                 debug!("Received QBustype CMD");
-                self.transport
-                    .write(&[S_ACK, 0x08])
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing QBustype response"))?;
+                self.usb_write(&[S_ACK, 0x08]).await?;
                 Ok(())
             }
             SerprogCommand::SyncNop => {
                 debug!("Received SyncNop CMD");
-                self.transport
-                    .write(&[S_NAK, S_ACK])
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing SyncNop response"))?;
+                self.usb_write(&[S_NAK, S_ACK]).await?;
                 Ok(())
             }
             SerprogCommand::SBustype => {
                 debug!("Received SBustype CMD");
                 let mut buf = [0u8; 1];
-                self.transport
-                    .read(&mut buf)
-                    .await
-                    .map_err(|_| SerprogError::TransportRead("Error reading SBustype data"))?;
+                self.usb_read(&mut buf).await?;
                 if buf[0] == 0x08 {
                     debug!("Received SBustype 'SPI'");
-                    self.transport
-                        .write(&[S_ACK])
-                        .await
-                        .map_err(|_| SerprogError::TransportWrite("Error writing SBustype ACK"))?;
+                    self.usb_write(&[S_ACK]).await?;
                 } else {
                     debug!("Received unknown SBustype");
-                    self.transport
-                        .write(&[S_NAK])
-                        .await
-                        .map_err(|_| SerprogError::TransportWrite("Error writing SBustype NAK"))?;
+                    self.usb_write(&[S_NAK]).await?;
                 }
                 Ok(())
             }
             SerprogCommand::OSpiOp => {
                 debug!("Received OSpiOp CMD");
-                let mut sdata = [0_u8; 64];
-                self.transport
-                    .read(sdata.as_mut_slice())
-                    .await
-                    .map_err(|_| SerprogError::TransportRead("Error reading OSpiOp data"))?;
+                let cmd = self.usb_cmd_sender.send().await;
+                *cmd = UsbCommand::Read { size: 64 };
+                self.usb_cmd_sender.send_done();
+
+                let result = self.usb_data_to_receiver.receive().await;
+                let sdata = match result {
+                    Ok(data) => data,
+                    Err(_) => {
+                        self.usb_data_to_receiver.receive_done();
+                        return Err(SerprogError::TransportRead("USB read failed"));
+                    }
+                };
 
                 let op_slen = le_u24_to_u32(&sdata[0..3]) as usize;
                 let op_rlen = le_u24_to_u32(&sdata[3..6]) as usize;
 
-                let mut usb_rx_spi_tx_buf = [([0u8; 64], 0); 4];
-                let mut usb_rx_spi_tx_channel: Channel<'_, NoopRawMutex, ([u8; 64], usize)> =
-                    Channel::new(&mut usb_rx_spi_tx_buf);
-                let (usb_rx, spi_tx) = usb_rx_spi_tx_channel.split();
+                // Handle SPI operation directly without complex async patterns
+                self.spi
+                    .flush()
+                    .await
+                    .map_err(|_| SerprogError::SpiFlush("Error flushing SPI before transfer"))?;
 
-                let mut usb_tx_spi_rx_buf = [([0u8; 64], 0); 8];
-                let mut usb_tx_spi_rx_channel: Channel<'_, NoopRawMutex, ([u8; 64], usize)> =
-                    Channel::new(&mut usb_tx_spi_rx_buf);
-                let (spi_rx, usb_tx) = usb_tx_spi_rx_channel.split();
+                self.cs
+                    .set_low()
+                    .map_err(|_| SerprogError::CsSetLow("Error setting CS low"))?;
 
-                let usb_task = async |transport: &mut T,
-                                      mut sender: Sender<NoopRawMutex, ([u8; 64], usize)>,
-                                      sdata_size: usize,
-                                      sdata_0: [u8; 64],
-                                      mut receiver: Receiver<NoopRawMutex, ([u8; 64], usize)>,
-                                      rdata_size: usize|
-                       -> Result<(), SerprogError> {
-                    // First block
-                    let mut data_to_read = sdata_size;
-                    {
-                        let (buf, size) = sender.send().await;
-                        let block_size = data_to_read.min(64 - 6);
-                        buf[..block_size].copy_from_slice(&sdata_0[6..6 + block_size]);
-                        *size = block_size;
-                        sender.send_done();
-                        data_to_read -= block_size;
-                    }
+                // Write phase: read data from USB and write to SPI
+                let mut data_to_write = op_slen;
 
-                    while data_to_read > 0 {
-                        let read_size = data_to_read.min(64);
-                        let (buf, size) = sender.send().await;
-                        *size = read_size;
-                        transport.read(&mut buf[..read_size]).await.map_err(|_| {
-                            SerprogError::TransportRead("Error reading OSpiOp data")
-                        })?;
-                        sender.send_done();
-                        data_to_read -= read_size;
-                    }
-                    transport
-                        .write(&[S_ACK])
+                // Handle first block from sdata
+                if data_to_write > 0 {
+                    assert!(sdata.len() - 6 <= data_to_write);
+                    self.spi
+                        .write(&sdata[6..])
                         .await
-                        .map_err(|_| SerprogError::TransportWrite("Error writing SBustype ACK"))?;
+                        .map_err(|_| SerprogError::SpiTransfer("Error writing OSpiOp data"))?;
+                    data_to_write -= sdata.len() - 6;
+                }
+                self.usb_data_to_receiver.receive_done();
 
-                    let mut data_to_send = rdata_size;
-                    while data_to_send > 0 {
-                        let (buf, size) = receiver.receive().await;
-                        let size = *size;
-                        transport.write(&buf[..size]).await.map_err(|_| {
-                            SerprogError::TransportWrite("Error writing SPI read data")
-                        })?;
-                        receiver.receive_done();
-                        data_to_send -= size;
+                let usb_reader = async {
+                    let mut remaining = data_to_write;
+                    while remaining > 0 {
+                        let chunk_size = remaining.min(64);
+                        let cmd = self.usb_cmd_sender.send().await;
+                        *cmd = UsbCommand::Read { size: chunk_size };
+                        self.usb_cmd_sender.send_done();
+                        remaining -= chunk_size;
                     }
-                    Ok(())
+                    Ok::<(), SerprogError>(())
                 };
 
-                let spi_task = async |spi: &mut SPI,
-                                      mut receiver: Receiver<NoopRawMutex, ([u8; 64], usize)>,
-                                      sdata_size: usize,
-                                      mut sender: Sender<NoopRawMutex, ([u8; 64], usize)>,
-                                      rdata_size: usize,
-                                      cs: &mut CS|
-                       -> Result<(), SerprogError> {
-                    spi.flush().await.map_err(|_| {
-                        SerprogError::SpiFlush("Error flushing SPI before transfer")
-                    })?;
+                let spi_writer = async {
+                    let mut remaining = data_to_write;
+                    while remaining > 0 {
+                        let result = self.usb_data_to_receiver.receive().await;
+                        let data = match result {
+                            Ok(data) => data,
+                            Err(_) => {
+                                self.usb_data_to_receiver.receive_done();
+                                return Err(SerprogError::TransportRead("USB read failed"));
+                            }
+                        };
 
-                    cs.set_low()
-                        .map_err(|_| SerprogError::CsSetLow("Error setting CS low"))?;
-                    let mut data_to_write = sdata_size;
-                    while data_to_write > 0 {
-                        let (buf, size) = receiver.receive().await;
-                        data_to_write -= *size;
-                        spi.write(&buf[..*size])
+                        self.spi
+                            .write(data)
                             .await
                             .map_err(|_| SerprogError::SpiTransfer("Error writing OSpiOp data"))?;
-                        receiver.receive_done();
+
+                        remaining -= data.len();
+                        self.usb_data_to_receiver.receive_done();
                     }
-                    let mut data_to_read = rdata_size;
-                    while data_to_read > 0 {
-                        let (buf, size) = sender.send().await;
-                        let read_size = data_to_read.min(buf.len());
-                        spi.read(&mut buf[..read_size])
-                            .await
-                            .map_err(|_| SerprogError::SpiTransfer("Error reading OSpiOp data"))?;
-                        *size = read_size;
-                        sender.send_done();
-                        data_to_read -= read_size;
-                    }
-                    cs.set_high()
-                        .map_err(|_| SerprogError::CsSetHigh("Error setting CS high"))?;
-                    debug!("OSpiOp CMD done");
-                    Ok(())
+                    Ok::<(), SerprogError>(())
                 };
 
-                let (spi_res, usb_res) = block_on(join(
-                    spi_task(
-                        &mut self.spi,
-                        spi_tx,
-                        op_slen,
-                        spi_rx,
-                        op_rlen,
-                        &mut self.cs,
-                    ),
-                    usb_task(&mut self.transport, usb_rx, op_slen, sdata, usb_tx, op_rlen),
-                ));
-                if let Err(spi_err) = spi_res {
-                    self.transport
-                        .write(&[S_NAK])
-                        .await
-                        .map_err(|_| SerprogError::TransportWrite("Failed to report SPI failed"))?;
-                    return Err(spi_err);
-                }
-                usb_res?;
+                let (usb_result, spi_result) =
+                    embassy_futures::join::join(usb_reader, spi_writer).await;
+                usb_result?;
+                spi_result?;
 
+                // Send ACK after write phase
+                self.usb_write(&[S_ACK]).await?;
+
+                // Read phase: read from SPI and send to USB
+                let mut data_to_read = op_rlen;
+                while data_to_read > 0 {
+                    let read_size = data_to_read.min(64);
+
+                    let cmd = self.usb_cmd_sender.send().await;
+                    *cmd = UsbCommand::Write {
+                        data: heapless::Vec::new(),
+                    };
+
+                    if let UsbCommand::Write { data } = cmd {
+                        // Use unsafe set_len to set the correct size without initialization
+                        unsafe {
+                            data.set_len(read_size);
+                        }
+
+                        // Read directly from SPI into the buffer
+                        self.spi
+                            .read(data)
+                            .await
+                            .map_err(|_| SerprogError::SpiTransfer("Error reading OSpiOp data"))?;
+                    }
+
+                    self.usb_cmd_sender.send_done();
+
+                    // Wait for USB write to complete and check result
+                    let result = self.usb_data_to_receiver.receive().await;
+                    match result {
+                        Ok(_) => {
+                            self.usb_data_to_receiver.receive_done();
+                        }
+                        Err(_) => {
+                            self.usb_data_to_receiver.receive_done();
+                            return Err(SerprogError::TransportWrite("USB write failed during SPI read"));
+                        }
+                    }
+
+                    data_to_read -= read_size;
+                }
+
+                self.cs
+                    .set_high()
+                    .map_err(|_| SerprogError::CsSetHigh("Error setting CS high"))?;
+                debug!("OSpiOp CMD done");
                 Ok(())
             }
             SerprogCommand::SSpiFreq => {
                 debug!("Received SSpiFreq CMD");
                 let mut request = SSpiFreqRequest::new_zeroed();
-                self.transport
-                    .read(request.as_mut_bytes())
-                    .await
-                    .map_err(|_| SerprogError::TransportRead("Error reading SSpiFreq data"))?;
+                self.usb_read(request.as_mut_bytes()).await?;
 
                 // Parse the request using zerocopy
                 let try_freq = request.freq.get();
@@ -491,20 +515,13 @@ where
                     freq: U32::new(try_freq), // TODO can we report what the hardware has set up?
                 };
 
-                self.transport
-                    .write(response.as_bytes())
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing SSpiFreq response"))?;
-
+                self.usb_write(response.as_bytes()).await?;
                 Ok(())
             }
             SerprogCommand::SPinState => {
                 debug!("Received SPinState CMD");
                 let mut buf = [0u8; 1];
-                self.transport
-                    .read(&mut buf)
-                    .await
-                    .map_err(|_| SerprogError::TransportRead("Error reading SPinState data"))?;
+                self.usb_read(&mut buf).await?;
                 if buf[0] == 0 {
                     self.led
                         .set_low()
@@ -514,19 +531,12 @@ where
                         .set_high()
                         .map_err(|_| SerprogError::LedSetHigh("Error setting LED high"))?;
                 }
-                self.transport
-                    .write(&[S_ACK])
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing SPinState ACK"))?;
-
+                self.usb_write(&[S_ACK]).await?;
                 Ok(())
             }
             _ => {
                 debug!("Received unknown CMD");
-                self.transport.write(&[S_NAK]).await.map_err(|_| {
-                    SerprogError::TransportWrite("Error writing unknown command NAK")
-                })?;
-
+                self.usb_write(&[S_NAK]).await?;
                 Ok(())
             }
         }

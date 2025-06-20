@@ -146,6 +146,10 @@ async fn usb_task(mut usb: CustomUsbDevice) -> ! {
 
 #[embassy_executor::task]
 async fn serprog_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiResources) -> ! {
+    use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+    use embassy_sync::zerocopy_channel::Channel;
+    use serprog::usb_task::UsbCommand;
+
     let mut config = SpiConfig::default();
     config.frequency = 12_000_000; // 12 MHz
 
@@ -165,8 +169,39 @@ async fn serprog_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiResour
         spi.set_frequency(freq);
     };
 
-    let serprog = serprog::Serprog::new(spi, cs, led, class, Some(set_freq_cb));
-    serprog.run_loop().await
+    // Create static channels for USB communication
+    static USB_CMD_BUF: StaticCell<[UsbCommand; 4]> = StaticCell::new();
+    static USB_RESP_BUF: StaticCell<[Result<heapless::Vec<u8, 64>, ()>; 4]> = StaticCell::new();
+    static USB_CMD_CHANNEL: StaticCell<Channel<'static, NoopRawMutex, UsbCommand>> =
+        StaticCell::new();
+    static USB_RESP_CHANNEL: StaticCell<
+        Channel<'static, NoopRawMutex, Result<heapless::Vec<u8, 64>, ()>>,
+    > = StaticCell::new();
+
+    let usb_cmd_buf = USB_CMD_BUF.init(core::array::from_fn(|_| UsbCommand::Read { size: 0 }));
+    let usb_resp_buf = USB_RESP_BUF.init(core::array::from_fn(|_| Err(())));
+
+    let usb_cmd_channel = USB_CMD_CHANNEL.init(Channel::new(usb_cmd_buf));
+    let usb_resp_channel = USB_RESP_CHANNEL.init(Channel::new(usb_resp_buf));
+
+    let (usb_cmd_sender, usb_cmd_receiver) = usb_cmd_channel.split();
+    let (usb_resp_sender, usb_resp_receiver) = usb_resp_channel.split();
+
+    // Run both tasks concurrently using join
+    let usb_task = serprog::usb_task::usb_task(class, usb_cmd_receiver, usb_resp_sender);
+
+    let serprog = serprog::Serprog::new(
+        spi,
+        cs,
+        led,
+        usb_cmd_sender,
+        usb_resp_receiver,
+        Some(set_freq_cb),
+    );
+    let serprog_task = serprog.run_loop();
+
+    embassy_futures::join::join(usb_task, serprog_task).await;
+    unreachable!()
 }
 
 #[panic_handler]

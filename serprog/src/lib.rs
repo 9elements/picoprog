@@ -16,9 +16,11 @@ use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, Unaligned};
 
 use defmt::{debug, error, Format};
 
+pub mod cs_control;
 pub mod no_spi;
 pub mod transport;
 
+pub use cs_control::{CsControl, NoCs};
 pub use no_spi::NoSpi;
 
 pub trait ChangeSpiFreq {
@@ -283,7 +285,7 @@ pub struct Serprog<SPI, CS, LED, T: Transport> {
 impl<SPI, CS, LED, T> Serprog<SPI, CS, LED, T>
 where
     SPI: SpiBus<u8> + ChangeSpiFreq,
-    CS: OutputPin,
+    CS: CsControl,
     LED: OutputPin,
     T: Transport,
 {
@@ -314,7 +316,6 @@ where
 
     async fn handle_command(&mut self, cmd: SerprogCommand) -> Result<(), SerprogError>
     where
-        CS::Error: core::fmt::Debug,
         LED::Error: core::fmt::Debug,
     {
         match cmd {
@@ -620,6 +621,31 @@ where
                     .await
                     .map_err(|_| SerprogError::TransportWrite("Error writing SPinState ACK"))?;
 
+                Ok(())
+            }
+            SerprogCommand::SSpiCs => {
+                debug!("Received SSpiCs CMD");
+                let mut buf = [0u8; 1];
+                self.transport
+                    .read(&mut buf)
+                    .await
+                    .map_err(|_| SerprogError::TransportRead("Error reading SSpiCs data"))?;
+
+                let cs_index = buf[0];
+                match self.cs.select_cs(cs_index) {
+                    Ok(()) => {
+                        debug!("Selected CS {}", cs_index);
+                        self.transport.write(&[S_ACK]).await.map_err(|_| {
+                            SerprogError::TransportWrite("Error writing SSpiCs ACK")
+                        })?;
+                    }
+                    Err(_) => {
+                        debug!("Failed to select CS {}", cs_index);
+                        self.transport.write(&[S_NAK]).await.map_err(|_| {
+                            SerprogError::TransportWrite("Error writing SSpiCs NAK")
+                        })?;
+                    }
+                }
                 Ok(())
             }
             _ => {

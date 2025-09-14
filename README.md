@@ -32,6 +32,7 @@ cd picoprog
 
 For Raspberry Pi Pico:
 ```sh
+cd picoprog
 cargo run --release
 ```
 

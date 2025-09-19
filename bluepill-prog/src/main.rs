@@ -17,6 +17,7 @@ use embassy_stm32::peripherals::{self, USB};
 use embassy_stm32::spi::{Config as SpiConfig, Spi};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::usb::{Driver, InterruptHandler as USBInterruptHandler};
+use embassy_stm32::Peri;
 use embassy_time::Timer;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
@@ -78,7 +79,7 @@ async fn main(spawner: Spawner) {
         // Pull the D+ pin down to send a RESET condition to the USB bus.
         // This forced reset is needed only for development, without it host
         // will not reset your device when you upload new firmware.
-        let _dp = Output::new(&mut r.usb.dp, Level::Low, Speed::Low);
+        let _dp = Output::new(r.usb.dp.reborrow(), Level::Low, Speed::Low);
         Timer::after_millis(10).await;
     }
 
@@ -136,8 +137,8 @@ async fn main(spawner: Spawner) {
     let usb = builder.build();
 
     // We can't really recover here so just unwrap
-    spawner.spawn(usb_task(usb)).unwrap();
-    spawner.spawn(serprog_task(serprog_class, r.spi)).unwrap();
+    spawner.spawn(usb_task(usb).unwrap());
+    spawner.spawn(serprog_task(serprog_class, r.spi).unwrap());
 
     loop {
         embassy_time::Timer::after(embassy_time::Duration::from_secs(1)).await;

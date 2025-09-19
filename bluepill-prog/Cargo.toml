@@ -19,7 +19,7 @@ embassy-sync = { workspace = true, features = ["defmt"] }
 embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime", "tick-hz-32_768"] }
 embassy-usb = { workspace = true, features = ["defmt"] }
 futures.workspace = true
-heapless = { workspace = true, features = ["defmt-03", "portable-atomic", "portable-atomic-critical-section", "ufmt"] }
+heapless = { workspace = true, features = ["portable-atomic", "portable-atomic-critical-section", "ufmt"] }
 panic-probe.workspace = true
 portable-atomic.workspace = true
 serprog.workspace = true

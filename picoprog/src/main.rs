@@ -17,6 +17,7 @@ use embassy_rp::peripherals::{self, PIO0, SPI0, USB};
 use embassy_rp::pio::InterruptHandler as PIOInterruptHandler;
 use embassy_rp::spi::{Config as SpiConfig, Spi};
 use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
+use embassy_rp::Peri;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::{Config as UsbConfig, UsbDevice};
@@ -116,9 +117,9 @@ async fn main(spawner: Spawner) {
 
     let usb = builder.build();
     // We can't really recover here so just unwrap
-    spawner.spawn(usb_task(usb)).unwrap();
-    spawner.spawn(uart::uart_task(uart_class, r.uart)).unwrap();
-    spawner.spawn(serprog_task(serprog_class, r.spi)).unwrap();
+    spawner.spawn(usb_task(usb).unwrap());
+    spawner.spawn(uart::uart_task(uart_class, r.uart).unwrap());
+    spawner.spawn(serprog_task(serprog_class, r.spi).unwrap());
 
     loop {
         embassy_time::Timer::after(embassy_time::Duration::from_secs(1)).await;

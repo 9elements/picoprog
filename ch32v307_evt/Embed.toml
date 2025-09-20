@@ -1,0 +1,8 @@
+[default.probe]
+protocol = "Jtag"
+
+[default.general]
+chip = "CH32V307"
+
+[default.rtt]
+enabled = true

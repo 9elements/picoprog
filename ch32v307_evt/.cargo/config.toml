@@ -1,0 +1,14 @@
+[target.riscv32imfc-unknown-none-elf]
+linker = "flip-link"
+#runner = "../../probe-rs/target/release/probe-rs run --chip CH32V307"
+runner = "probe-rs run --chip CH32V307"
+
+[build]
+target = "riscv32imfc-unknown-none-elf.json"
+
+[unstable]
+build-std = ["core"]
+build-std-features = ["panic_immediate_abort"]
+
+[env]
+DEFMT_LOG = "debug"

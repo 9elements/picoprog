@@ -12,7 +12,7 @@ use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::flash::{Async, Flash};
-use embassy_rp::gpio::{Level, Output};
+use embassy_rp::gpio::{Flex, Level, Output, Pull};
 use embassy_rp::peripherals::{self, PIO0, SPI0, USB};
 use embassy_rp::pio::InterruptHandler as PIOInterruptHandler;
 use embassy_rp::spi::{Config as SpiConfig, Spi};
@@ -21,6 +21,7 @@ use embassy_rp::Peri;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::{Config as UsbConfig, UsbDevice};
+use embedded_hal_async::spi::SpiBus;
 use heapless::String;
 use static_cell::StaticCell;
 use ufmt::uwrite;
@@ -150,6 +151,13 @@ async fn serprog_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiResour
     let mut config = SpiConfig::default();
     config.frequency = 12_000_000; // 12 MHz
 
+    // Capture pin numbers for idle/active reconfiguration
+    use embassy_rp::gpio::Pin as _;
+    let clk_pin_num = r.clk.pin();
+    let mosi_pin_num = r.mosi.pin();
+    let miso_pin_num = r.miso.pin();
+    let cs_pin_num = r.cs.pin();
+
     let spi = Spi::new(
         r.peripheral,
         r.clk,
@@ -159,14 +167,142 @@ async fn serprog_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiResour
         r.miso_dma,
         config,
     );
-    let cs = Output::new(r.cs, Level::High);
+    // Local wrapper types to satisfy orphan rules and implement SerprogSpi here.
+    struct SpiWrapper<'d> {
+        spi: Spi<'d, SPI0, embassy_rp::spi::Async>,
+        cs: Output<'static>,
+        clk_pin: u8,
+        mosi_pin: u8,
+        miso_pin: u8,
+        cs_pin: u8,
+    }
+
+    struct SpiWrapperIdle<'d> {
+        spi: Spi<'d, SPI0, embassy_rp::spi::Async>,
+        clk_pin: u8,
+        mosi_pin: u8,
+        miso_pin: u8,
+        cs_pin: u8,
+    }
+
+    impl<'d> serprog::SerprogSpiIdle<u8> for SpiWrapperIdle<'d> {
+        type Active = SpiWrapper<'d>;
+        fn active(self) -> Self::Active {
+            // Reconfigure SPI pins back to peripheral function.
+            fn set_spi_funcsel(pin: u8) {
+                use embassy_rp::pac;
+                let gpio = pac::IO_BANK0.gpio(pin as _);
+                gpio.ctrl().write(|w| w.set_funcsel(1));
+                let pads = pac::PADS_BANK0.gpio(pin as _);
+                pads.write(|w| {
+                    #[cfg(feature = "_rp235x")]
+                    w.set_iso(false);
+                    w.set_schmitt(true);
+                    w.set_slewfast(false);
+                    w.set_ie(true);
+                    w.set_od(false);
+                    w.set_pue(false);
+                    w.set_pde(false);
+                });
+            }
+
+            set_spi_funcsel(self.clk_pin);
+            set_spi_funcsel(self.mosi_pin);
+            set_spi_funcsel(self.miso_pin);
+
+            // Recreate CS output as High (inactive).
+            let cs =
+                unsafe { Output::new(embassy_rp::gpio::AnyPin::steal(self.cs_pin), Level::High) };
+
+            SpiWrapper {
+                spi: self.spi,
+                cs,
+                clk_pin: self.clk_pin,
+                mosi_pin: self.mosi_pin,
+                miso_pin: self.miso_pin,
+                cs_pin: self.cs_pin,
+            }
+        }
+    }
+
+    impl<'d> serprog::SerprogSpi<u8> for SpiWrapper<'d> {
+        type Error = <Spi<'d, SPI0, embassy_rp::spi::Async> as embedded_hal::spi::ErrorType>::Error;
+        type Idle = SpiWrapperIdle<'d>;
+
+        fn change_freq(&mut self, freq: u32) {
+            self.spi.set_frequency(freq);
+        }
+
+        fn get_freq(&self) -> u32 {
+            0
+        }
+
+        fn cs_set_low(&mut self) -> Result<(), ()> {
+            self.cs.set_low();
+            Ok(())
+        }
+
+        fn cs_set_high(&mut self) -> Result<(), ()> {
+            self.cs.set_high();
+            Ok(())
+        }
+
+        async fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+            <Spi<'d, SPI0, embassy_rp::spi::Async> as SpiBus<u8>>::read(&mut self.spi, words).await
+        }
+
+        async fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
+            <Spi<'d, SPI0, embassy_rp::spi::Async> as SpiBus<u8>>::write(&mut self.spi, words).await
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            <Spi<'d, SPI0, embassy_rp::spi::Async> as SpiBus<u8>>::flush(&mut self.spi).await
+        }
+
+        fn idle(self) -> Self::Idle {
+            // Set all used GPIOs to input (SIO function, no pulls)
+            fn set_gpio_input(pin: u8) {
+                unsafe {
+                    let mut flex = Flex::new(embassy_rp::gpio::AnyPin::steal(pin));
+                    flex.set_as_input();
+                    flex.set_pull(Pull::None);
+                }
+            }
+
+            // Drop CS output to free the pin, then set as input
+            let cs_pin = self.cs_pin;
+            core::mem::drop(self.cs);
+            set_gpio_input(cs_pin);
+
+            set_gpio_input(self.clk_pin);
+            set_gpio_input(self.mosi_pin);
+            set_gpio_input(self.miso_pin);
+
+            SpiWrapperIdle {
+                spi: self.spi,
+                clk_pin: self.clk_pin,
+                mosi_pin: self.mosi_pin,
+                miso_pin: self.miso_pin,
+                cs_pin,
+            }
+        }
+    }
+    // Create CS and LED outputs
+    let cs = unsafe { Output::new(embassy_rp::gpio::AnyPin::steal(cs_pin_num), Level::High) };
     let led = Output::new(r.led, Level::Low);
 
-    let set_freq_cb = move |spi: &mut Spi<'_, SPI0, embassy_rp::spi::Async>, freq| {
-        spi.set_frequency(freq);
-    };
-
-    let serprog = serprog::Serprog::new(spi, cs, led, class, Some(set_freq_cb));
+    let serprog = serprog::Serprog::new(
+        SpiWrapper {
+            spi,
+            cs,
+            clk_pin: clk_pin_num,
+            mosi_pin: mosi_pin_num,
+            miso_pin: miso_pin_num,
+            cs_pin: cs_pin_num,
+        },
+        led,
+        class,
+    );
     serprog.run_loop().await
 }
 

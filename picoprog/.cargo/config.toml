@@ -8,4 +8,3 @@ target = "thumbv6m-none-eabi"
 
 [unstable]
 build-std = ["core"]
-build-std-features = ["panic_immediate_abort"]

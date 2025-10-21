@@ -1,11 +1,15 @@
 #![no_std]
+#![allow(async_fn_in_trait)]
+
 
 use core::convert::From;
+use core::mem::replace;
 use core::result::Result::{Err, Ok};
 use embassy_futures::{block_on, join::join};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::zerocopy_channel::{Channel, Receiver, Sender};
 use embedded_hal::digital::OutputPin;
+use embedded_hal::spi::ErrorType;
 use embedded_hal_async::spi::SpiBus;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use tock_registers::register_bitfields;
@@ -68,6 +72,8 @@ impl QMaxLenResponse {
         }
     }
 }
+
+// (No ActiveGuard; we manage SPI state via SpiState enum with moves)
 
 #[derive(FromBytes, IntoBytes, Unaligned, Immutable)]
 #[repr(C, packed)]
@@ -162,7 +168,7 @@ register_bitfields! [u32,
 ];
 
 impl QCmdMapResponse {
-    fn new(has_freq_callback: bool) -> Self {
+    fn new() -> Self {
         let mut response = Self {
             ack: S_ACK,
             map: [0; 4],
@@ -184,9 +190,8 @@ impl QCmdMapResponse {
             + Commands::SBustype::SET
             + Commands::SPinState::SET;
 
-        if has_freq_callback {
-            cmd_flags += Commands::SSpiFreq::SET;
-        }
+        // Frequency control supported via SerprogSpi trait
+        cmd_flags += Commands::SSpiFreq::SET;
 
         cmdmap.modify(cmd_flags);
 
@@ -198,30 +203,98 @@ impl QCmdMapResponse {
     }
 }
 
-pub struct Serprog<SPI, CS, LED, T: Transport, F> {
-    spi: SPI,
-    cs: CS,
-    led: LED,
-    transport: T,
-    freq_callback: Option<F>,
+pub trait SerprogSpiIdle<Word: 'static + Copy = u8> {
+    type Active: SerprogSpi<Word>;
+    fn active(self) -> Self::Active;
 }
 
-impl<SPI, CS, LED, T, F> Serprog<SPI, CS, LED, T, F>
+pub trait SerprogSpi<Word: 'static + Copy = u8> {
+    type Error;
+    type Idle: SerprogSpiIdle<Word, Active = Self>;
+    fn change_freq(&mut self, freq: u32);
+    fn get_freq(&self) -> u32;
+    fn cs_set_low(&mut self) -> Result<(), ()>;
+    fn cs_set_high(&mut self) -> Result<(), ()>;
+    async fn read(&mut self, words: &mut [Word]) -> Result<(), Self::Error>;
+    async fn write(&mut self, words: &[Word]) -> Result<(), Self::Error>;
+    async fn flush(&mut self) -> Result<(), Self::Error>;
+    fn idle(self) -> Self::Idle;
+}
+
+// Default implementation for any async SPI bus over `u8` words.
+pub struct IdentityIdle<T>(pub T);
+
+impl<Word: 'static + Copy, T> SerprogSpiIdle<Word> for IdentityIdle<T>
 where
-    SPI: SpiBus<u8>,
-    CS: OutputPin,
+    T: SerprogSpi<Word>,
+{
+    type Active = T;
+    fn active(self) -> Self::Active {
+        self.0
+    }
+}
+
+impl<T> SerprogSpi for T
+where
+    T: SpiBus<u8> + ErrorType,
+{
+    type Error = <T as ErrorType>::Error;
+    type Idle = IdentityIdle<Self>;
+
+    fn change_freq(&mut self, _freq: u32) {
+        // Default no-op
+    }
+
+    fn get_freq(&self) -> u32 {
+        // Default unknown frequency
+        0
+    }
+
+    fn cs_set_low(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+
+    fn cs_set_high(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+
+    async fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+        SpiBus::<u8>::read(self, words).await
+    }
+
+    async fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
+        SpiBus::<u8>::write(self, words).await
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        SpiBus::<u8>::flush(self).await
+    }
+
+    fn idle(self) -> Self::Idle {
+        IdentityIdle(self)
+    }
+}
+
+enum SpiState<SPI: SerprogSpi> {
+    Idle(SPI::Idle),
+    Active(SPI),
+    Transition,
+}
+
+pub struct Serprog<LED, T: Transport, SPI: SerprogSpi> {
+    spi_state: SpiState<SPI>,
+    led: LED,
+    transport: T,
+}
+
+impl<LED, T, SPI> Serprog<LED, T, SPI>
+where
+    SPI: SerprogSpi,
     LED: OutputPin,
     T: Transport,
-    F: FnMut(&mut SPI, u32) + Send + Sync,
 {
-    pub fn new(spi: SPI, cs: CS, led: LED, transport: T, freq_callback: Option<F>) -> Self {
-        Self {
-            spi,
-            cs,
-            led,
-            transport,
-            freq_callback,
-        }
+    pub fn new(spi: SPI, led: LED, transport: T) -> Self {
+        Self { spi_state: SpiState::Idle(spi.idle()), led, transport }
     }
 
     pub async fn run_loop(mut self) -> ! {
@@ -242,7 +315,6 @@ where
 
     async fn handle_command(&mut self, cmd: SerprogCommand) -> Result<(), SerprogError>
     where
-        CS::Error: core::fmt::Debug,
         LED::Error: core::fmt::Debug,
     {
         match cmd {
@@ -268,7 +340,7 @@ where
             }
             SerprogCommand::QCmdMap => {
                 debug!("Received QCmdMap CMD");
-                let response = QCmdMapResponse::new(self.freq_callback.is_some());
+                let response = QCmdMapResponse::new();
                 self.transport
                     .write(response.as_bytes())
                     .await
@@ -410,14 +482,13 @@ where
                                       mut receiver: Receiver<NoopRawMutex, ([u8; 64], usize)>,
                                       sdata_size: usize,
                                       mut sender: Sender<NoopRawMutex, ([u8; 64], usize)>,
-                                      rdata_size: usize,
-                                      cs: &mut CS|
+                                      rdata_size: usize|
                        -> Result<(), SerprogError> {
                     spi.flush().await.map_err(|_| {
                         SerprogError::SpiFlush("Error flushing SPI before transfer")
                     })?;
 
-                    cs.set_low()
+                    spi.cs_set_low()
                         .map_err(|_| SerprogError::CsSetLow("Error setting CS low"))?;
                     let mut data_to_write = sdata_size;
                     while data_to_write > 0 {
@@ -439,21 +510,21 @@ where
                         sender.send_done();
                         data_to_read -= read_size;
                     }
-                    cs.set_high()
+                    spi.cs_set_high()
                         .map_err(|_| SerprogError::CsSetHigh("Error setting CS high"))?;
                     debug!("OSpiOp CMD done");
                     Ok(())
                 };
 
+                // Activate SPI from idle for this operation by moving it out
+                let mut spi = match replace(&mut self.spi_state, SpiState::Transition) {
+                    SpiState::Idle(idle) => idle.active(),
+                    SpiState::Active(spi) => spi,
+                    SpiState::Transition => unreachable!(),
+                };
+
                 let (spi_res, usb_res) = block_on(join(
-                    spi_task(
-                        &mut self.spi,
-                        spi_tx,
-                        op_slen,
-                        spi_rx,
-                        op_rlen,
-                        &mut self.cs,
-                    ),
+                    spi_task(&mut spi, spi_tx, op_slen, spi_rx, op_rlen),
                     usb_task(&mut self.transport, usb_rx, op_slen, sdata, usb_tx, op_rlen),
                 ));
                 if let Err(spi_err) = spi_res {
@@ -464,6 +535,9 @@ where
                     return Err(spi_err);
                 }
                 usb_res?;
+
+                // Return SPI to idle state after transfer
+                self.spi_state = SpiState::Idle(spi.idle());
 
                 Ok(())
             }
@@ -480,10 +554,14 @@ where
 
                 debug!("Setting SPI frequency: {:?}", try_freq);
 
-                // Call the frequency callback if set
-                if let Some(callback) = &mut self.freq_callback {
-                    (callback)(&mut self.spi, try_freq);
-                }
+                // Temporarily activate SPI to change frequency
+                let mut spi = match replace(&mut self.spi_state, SpiState::Transition) {
+                    SpiState::Idle(idle) => idle.active(),
+                    SpiState::Active(spi) => spi,
+                    SpiState::Transition => unreachable!(),
+                };
+                spi.change_freq(try_freq);
+                self.spi_state = SpiState::Idle(spi.idle());
 
                 // Create and send response
                 let response = SSpiFreqResponse {

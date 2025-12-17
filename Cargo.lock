@@ -1525,6 +1525,7 @@ dependencies = [
  "defmt 1.0.1",
  "embassy-futures",
  "embassy-sync",
+ "embassy-time",
  "embassy-usb",
  "embedded-hal 1.0.0",
  "embedded-hal-async",

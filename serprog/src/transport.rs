@@ -1,18 +1,20 @@
 use core::future;
 use embassy_usb::class::cdc_acm::CdcAcmClass;
 
-pub trait Transport {
+pub trait Transport<const TRANSFER_SIZE: usize> {
     fn read(&mut self, buf: &mut [u8]) -> impl future::Future<Output = Result<(), ()>>;
     fn write(&mut self, data: &[u8]) -> impl future::Future<Output = Result<(), ()>>;
 }
 
-impl<'d, D: embassy_usb::driver::Driver<'d>> Transport for CdcAcmClass<'d, D> {
+impl<'d, D: embassy_usb::driver::Driver<'d>, const TRANSFER_SIZE: usize> Transport<TRANSFER_SIZE>
+    for CdcAcmClass<'d, D>
+{
     async fn read(&mut self, buf: &mut [u8]) -> Result<(), ()> {
         let packet_size = self.max_packet_size() as usize;
         let buf_len = buf.len();
 
         // Use a buffer large enough for full speed and high speed
-        let mut buffer = [0; 512];
+        let mut buffer = [0; TRANSFER_SIZE];
         let mut size = 0;
         if buf_len < packet_size {
             let bytes_read = self

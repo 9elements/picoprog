@@ -1,12 +1,13 @@
 #![no_std]
 
-use core::convert::From;
 use core::result::Result::{Err, Ok};
-use embassy_futures::{block_on, join::join};
+use embassy_futures::join::join;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::zerocopy_channel::{Channel, Receiver, Sender};
+use embassy_time::{with_timeout, Duration};
 use embedded_hal::digital::OutputPin;
 use embedded_hal_async::spi::SpiBus;
+use heapless::Vec;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use tock_registers::register_bitfields;
 use tock_registers::LocalRegisterCopy;
@@ -22,6 +23,7 @@ pub mod transport;
 pub enum SerprogError {
     TransportRead(&'static str),
     TransportWrite(&'static str),
+    Timeout(&'static str),
     SpiTransfer(&'static str),
     SpiFlush(&'static str),
     CsSetLow(&'static str),
@@ -162,7 +164,7 @@ register_bitfields! [u32,
 ];
 
 impl QCmdMapResponse {
-    fn new(has_freq_callback: bool) -> Self {
+    fn new() -> Self {
         let mut response = Self {
             ack: S_ACK,
             map: [0; 4],
@@ -171,7 +173,7 @@ impl QCmdMapResponse {
 
         // Set supported commands using tock-registers
         let mut cmdmap = LocalRegisterCopy::<u32, Commands::Register>::new(0);
-        let mut cmd_flags = Commands::Nop::SET
+        let cmd_flags = Commands::Nop::SET
             + Commands::QIface::SET
             + Commands::QCmdMap::SET
             + Commands::QPgmName::SET
@@ -182,11 +184,8 @@ impl QCmdMapResponse {
             + Commands::QRdNMaxLen::SET
             + Commands::OSpiOp::SET
             + Commands::SBustype::SET
-            + Commands::SPinState::SET;
-
-        if has_freq_callback {
-            cmd_flags += Commands::SSpiFreq::SET;
-        }
+            + Commands::SPinState::SET
+            + Commands::SSpiFreq::SET;
 
         cmdmap.modify(cmd_flags);
 
@@ -198,337 +197,537 @@ impl QCmdMapResponse {
     }
 }
 
-pub struct Serprog<SPI, CS, LED, T: Transport, F> {
-    spi: SPI,
-    cs: CS,
-    led: LED,
-    transport: T,
-    freq_callback: Option<F>,
+/// Trait for a guard that provides access to SPI and CS.
+/// When the guard is dropped, the pins should be set back to input mode.
+pub trait SpiCsGuard {
+    type Spi: SpiBus<u8>;
+    type Cs: OutputPin;
+
+    /// Get mutable references to the SPI bus and CS pin.
+    fn spi_cs(&mut self) -> (&mut Self::Spi, &mut Self::Cs);
 }
 
-impl<SPI, CS, LED, T, F> Serprog<SPI, CS, LED, T, F>
-where
-    SPI: SpiBus<u8>,
-    CS: OutputPin,
-    LED: OutputPin,
-    T: Transport,
-    F: FnMut(&mut SPI, u32) + Send + Sync,
-{
-    pub fn new(spi: SPI, cs: CS, led: LED, transport: T, freq_callback: Option<F>) -> Self {
-        Self {
-            spi,
-            cs,
-            led,
-            transport,
-            freq_callback,
-        }
+/// Generic implementation of `SpiCsGuard` that holds an SPI bus and CS pin.
+///
+/// **Important**: This basic implementation does NOT reset pins to input/high-impedance
+/// mode when dropped. Embassy's SPI and Output types do not automatically reset pins
+/// on drop. If you need pin cleanup (recommended to avoid interfering with the target
+/// board), implement a custom guard that resets pins in its `Drop` implementation.
+///
+/// See the picoprog and bluepill-prog examples for how to properly reset pins on drop.
+pub struct SpiCsGuardImpl<SPI, CS> {
+    pub spi: SPI,
+    pub cs: CS,
+}
+
+impl<SPI, CS> SpiCsGuardImpl<SPI, CS> {
+    /// Create a new guard.
+    ///
+    /// **Warning**: Pins will NOT be automatically reset to input mode when dropped.
+    /// Consider implementing a custom guard if you need pin cleanup.
+    pub fn new(spi: SPI, cs: CS) -> Self {
+        Self { spi, cs }
     }
+}
 
-    pub async fn run_loop(mut self) -> ! {
-        let mut buf = [0; 1];
+impl<SPI: SpiBus<u8>, CS: OutputPin> SpiCsGuard for SpiCsGuardImpl<SPI, CS> {
+    type Spi = SPI;
+    type Cs = CS;
 
-        loop {
-            if self.transport.read(&mut buf).await.is_err() {
-                error!("Read error in main loop");
-                continue;
-            }
-
-            let cmd = SerprogCommand::try_from(buf[0]).unwrap_or(SerprogCommand::Nop);
-            if let Err(e) = self.handle_command(cmd).await {
-                error!("Command error: {:?}", e);
-            }
-        }
+    fn spi_cs(&mut self) -> (&mut Self::Spi, &mut Self::Cs) {
+        (&mut self.spi, &mut self.cs)
     }
+}
 
-    async fn handle_command(&mut self, cmd: SerprogCommand) -> Result<(), SerprogError>
+/// Trait for providing SPI device and CS pin on demand.
+/// The SPI device is created when needed and the pins are released (set back to input)
+/// when the returned guard is dropped.
+pub trait SpiDeviceProvider {
+    type Guard<'a>: SpiCsGuard
     where
-        CS::Error: core::fmt::Debug,
-        LED::Error: core::fmt::Debug,
-    {
-        match cmd {
-            SerprogCommand::Nop => {
-                debug!("Received Nop CMD");
-                self.transport
+        Self: 'a;
+
+    /// Acquire the SPI device and CS pin. The pins should be configured as outputs.
+    /// When the returned guard is dropped, the pins should be set back to input mode.
+    ///
+    /// # Arguments
+    /// * `freq_hz` - The requested SPI clock frequency in Hz.
+    fn acquire(&mut self, freq_hz: u32) -> Self::Guard<'_>;
+}
+
+/// Trait for providing an LED indicator
+pub trait LedProvider {
+    type Led: OutputPin;
+
+    fn led(&mut self) -> &mut Self::Led;
+}
+
+/// Blanket implementation of `LedProvider` for any `OutputPin`.
+/// This allows passing an `Output` directly without a wrapper struct.
+impl<L: OutputPin> LedProvider for L {
+    type Led = L;
+
+    fn led(&mut self) -> &mut Self::Led {
+        self
+    }
+}
+
+async fn ospiop_usb_task<T: Transport<TRANSFER_SIZE>, const TRANSFER_SIZE: usize>(
+    transport: &mut T,
+    mut sender: Sender<'_, NoopRawMutex, Vec<u8, TRANSFER_SIZE>>,
+    sdata_size: usize,
+    mut receiver: Receiver<'_, NoopRawMutex, Vec<u8, TRANSFER_SIZE>>,
+    rdata_size: usize,
+) -> Result<(), SerprogError> {
+    // First block - already contains header + initial data, send as-is
+    let mut data_to_read = sdata_size;
+    let first_block_data_size = data_to_read.min(TRANSFER_SIZE - 6);
+    sender.send_done();
+    data_to_read -= first_block_data_size;
+
+    while data_to_read > 0 {
+        let read_size = data_to_read.min(TRANSFER_SIZE);
+        let buf = with_timeout(SPIOP_TIMEOUT, sender.send())
+            .await
+            .map_err(|_| SerprogError::Timeout("Timeout allocating buffer for USB read"))?;
+        buf.clear();
+        buf.resize(read_size, 0).ok();
+        with_timeout(SPIOP_TIMEOUT, transport.read(buf.as_mut_slice()))
+            .await
+            .map_err(|_| SerprogError::Timeout("Timeout reading OSpiOp data from host"))?
+            .map_err(|_| SerprogError::TransportRead("Error reading OSpiOp data from host"))?;
+        sender.send_done();
+        data_to_read -= read_size;
+    }
+    with_timeout(SPIOP_TIMEOUT, transport.write(&[S_ACK]))
+        .await
+        .map_err(|_| SerprogError::Timeout("Timeout writing ACK to host"))?
+        .map_err(|_| SerprogError::TransportWrite("Error writing ACK to host"))?;
+
+    let mut data_to_send = rdata_size;
+    while data_to_send > 0 {
+        let buf = with_timeout(SPIOP_TIMEOUT, receiver.receive())
+            .await
+            .map_err(|_| SerprogError::Timeout("Timeout waiting for SPI read data"))?;
+        with_timeout(SPIOP_TIMEOUT, transport.write(buf.as_slice()))
+            .await
+            .map_err(|_| SerprogError::Timeout("Timeout writing SPI read data to host"))?
+            .map_err(|_| SerprogError::TransportWrite("Error writing SPI read data to host"))?;
+        data_to_send -= buf.len();
+        receiver.receive_done();
+    }
+    Ok(())
+}
+
+async fn ospiop_spi_task<SPI: SpiBus<u8>, CS: OutputPin, const TRANSFER_SIZE: usize>(
+    spi: &mut SPI,
+    mut receiver: Receiver<'_, NoopRawMutex, Vec<u8, TRANSFER_SIZE>>,
+    sdata_size: usize,
+    mut sender: Sender<'_, NoopRawMutex, Vec<u8, TRANSFER_SIZE>>,
+    rdata_size: usize,
+    cs: &mut CS,
+) -> Result<(), SerprogError> {
+    spi.flush()
+        .await
+        .map_err(|_| SerprogError::SpiFlush("Error flushing SPI before transfer"))?;
+
+    cs.set_low()
+        .map_err(|_| SerprogError::CsSetLow("Error setting CS low"))?;
+    let mut data_to_write = sdata_size;
+    let mut is_first = true;
+    while data_to_write > 0 {
+        let buf = with_timeout(SPIOP_TIMEOUT, receiver.receive())
+            .await
+            .map_err(|_| SerprogError::Timeout("Timeout writing ACK to host"))?;
+        //        .map_err(|_| SerprogError::TransportWrite("Error writing ACK to host"))?;
+
+        //        let buf = receiver.receive().await;
+        let write_slice = if is_first {
+            // First buffer: skip the 6-byte header
+            is_first = false;
+            let data_len = data_to_write.min(TRANSFER_SIZE - 6);
+            data_to_write -= data_len;
+            &buf[6..6 + data_len]
+        } else {
+            // Subsequent buffers: use entire buffer
+            data_to_write -= buf.len();
+            buf.as_slice()
+        };
+        spi.write(write_slice)
+            .await
+            .map_err(|_| SerprogError::SpiTransfer("Error writing OSpiOp data"))?;
+        receiver.receive_done();
+    }
+    let mut data_to_read = rdata_size;
+    while data_to_read > 0 {
+        let buf = with_timeout(SPIOP_TIMEOUT, sender.send())
+            .await
+            .map_err(|_| SerprogError::Timeout("Timeout writing ACK to host"))?;
+
+        //        let buf = sender.send().await;
+        buf.clear();
+        let read_size = data_to_read.min(TRANSFER_SIZE);
+        buf.resize(read_size, 0).ok();
+        spi.read(buf.as_mut_slice())
+            .await
+            .map_err(|_| SerprogError::SpiTransfer("Error reading OSpiOp data"))?;
+        sender.send_done();
+        data_to_read -= read_size;
+    }
+    cs.set_high()
+        .map_err(|_| SerprogError::CsSetHigh("Error setting CS high"))?;
+    debug!("OSpiOp CMD done");
+    Ok(())
+}
+
+/// Default SPI frequency in Hz (12 MHz)
+const DEFAULT_SPI_FREQ_HZ: u32 = 12_000_000;
+
+/// Timeout for SPI operations (3 seconds)
+/// This should be long enough for large flash operations but short enough
+/// to detect when the host has been halted or the SPI device is hung
+const SPIOP_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Timeout for simple command responses (5 seconds)
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Main serprog loop that handles commands from the transport.
+///
+/// This function runs indefinitely, processing serprog commands.
+/// SPI pins are only configured as outputs during actual SPI operations
+/// and are released (via the SpiDeviceProvider's Drop impl) after each operation.
+pub async fn run_loop<S, L, T, const TRANSFER_SIZE: usize>(
+    mut spi_provider: S,
+    mut led_provider: L,
+    mut transport: T,
+) -> !
+where
+    S: SpiDeviceProvider,
+    L: LedProvider,
+    T: Transport<TRANSFER_SIZE>,
+{
+    let mut buf = [0; 1];
+    let mut spi_freq_hz = DEFAULT_SPI_FREQ_HZ;
+
+    loop {
+        if transport.read(&mut buf).await.is_err() {
+            error!("Read error in main loop");
+            continue;
+        }
+
+        let cmd = SerprogCommand::try_from(buf[0]).unwrap_or(SerprogCommand::Nop);
+        if let Err(e) = handle_command::<_, _, _, TRANSFER_SIZE>(
+            &mut spi_provider,
+            &mut led_provider,
+            &mut transport,
+            cmd,
+            &mut spi_freq_hz,
+        )
+        .await
+        {
+            match e {
+                SerprogError::Timeout(_) => {
+                    error!("Timeout detected, host may have disconnected: {:?}", e);
+                    // Continue to main loop to wait for next command
+                }
+                _ => {
+                    error!("Command error: {:?}", e);
+                }
+            }
+        }
+    }
+}
+
+async fn handle_command<S, L, T, const TRANSFER_SIZE: usize>(
+    spi_provider: &mut S,
+    led_provider: &mut L,
+    transport: &mut T,
+    cmd: SerprogCommand,
+    spi_freq_hz: &mut u32,
+) -> Result<(), SerprogError>
+where
+    S: SpiDeviceProvider,
+    L: LedProvider,
+    T: Transport<TRANSFER_SIZE>,
+{
+    match cmd {
+        SerprogCommand::Nop => {
+            debug!("Received Nop CMD");
+            let operation = async {
+                transport
                     .write(&[S_ACK])
                     .await
                     .map_err(|_| SerprogError::TransportWrite("Error writing ACK"))?;
                 Ok(())
-            }
-            SerprogCommand::QIface => {
-                debug!("Received QIface CMD");
+            };
+            with_timeout(COMMAND_TIMEOUT, operation)
+                .await
+                .map_err(|_| SerprogError::Timeout("Nop command timed out"))??;
+            Ok(())
+        }
+        SerprogCommand::QIface => {
+            debug!("Received QIface CMD");
+            let operation = async {
                 let response = QIfaceResponse {
                     ack: S_ACK,
                     version: U16::new(1),
                 };
-                self.transport
+                transport
                     .write(response.as_bytes())
                     .await
                     .map_err(|_| SerprogError::TransportWrite("Error writing QIface response"))?;
                 Ok(())
-            }
-            SerprogCommand::QCmdMap => {
-                debug!("Received QCmdMap CMD");
-                let response = QCmdMapResponse::new(self.freq_callback.is_some());
-                self.transport
+            };
+            with_timeout(COMMAND_TIMEOUT, operation)
+                .await
+                .map_err(|_| SerprogError::Timeout("QIface command timed out"))??;
+            Ok(())
+        }
+        SerprogCommand::QCmdMap => {
+            debug!("Received QCmdMap CMD");
+            let operation = async {
+                let response = QCmdMapResponse::new();
+                transport
                     .write(response.as_bytes())
                     .await
                     .map_err(|_| SerprogError::TransportWrite("Error writing QCmdMap response"))?;
                 Ok(())
-            }
-            SerprogCommand::QPgmName => {
-                debug!("Received QPgmName CMD");
+            };
+            with_timeout(COMMAND_TIMEOUT, operation)
+                .await
+                .map_err(|_| SerprogError::Timeout("QCmdMap command timed out"))??;
+            Ok(())
+        }
+        SerprogCommand::QPgmName => {
+            debug!("Received QPgmName CMD");
+            let operation = async {
                 let response = QPgmNameResponse::new("Picoprog");
-                self.transport
+                transport
                     .write(response.as_bytes())
                     .await
                     .map_err(|_| SerprogError::TransportWrite("Error writing QPgmName response"))?;
                 Ok(())
-            }
-            SerprogCommand::QSerBuf => {
-                debug!("Received QSerBuf CMD");
-                self.transport
+            };
+            with_timeout(COMMAND_TIMEOUT, operation)
+                .await
+                .map_err(|_| SerprogError::Timeout("QPgmName command timed out"))??;
+            Ok(())
+        }
+        SerprogCommand::QSerBuf => {
+            debug!("Received QSerBuf CMD");
+            let operation = async {
+                transport
                     .write(&[S_ACK, 0xFF, 0xFF])
                     .await
                     .map_err(|_| SerprogError::TransportWrite("Error writing QSerBuf response"))?;
                 Ok(())
-            }
-            SerprogCommand::QWrNMaxLen | SerprogCommand::QRdNMaxLen => {
-                debug!("Received QWrNMaxLen/QRdNMaxLen CMD");
+            };
+            with_timeout(COMMAND_TIMEOUT, operation)
+                .await
+                .map_err(|_| SerprogError::Timeout("QSerBuf command timed out"))??;
+            Ok(())
+        }
+        SerprogCommand::QWrNMaxLen | SerprogCommand::QRdNMaxLen => {
+            debug!("Received QWrNMaxLen/QRdNMaxLen CMD");
+            let operation = async {
                 let response = QMaxLenResponse::new(MAX_BUFFER_SIZE);
-                self.transport
+                transport
                     .write(response.as_bytes())
                     .await
                     .map_err(|_| SerprogError::TransportWrite("Error writing QMaxLen response"))?;
                 Ok(())
-            }
-            SerprogCommand::QBustype => {
-                debug!("Received QBustype CMD");
-                self.transport
+            };
+            with_timeout(COMMAND_TIMEOUT, operation)
+                .await
+                .map_err(|_| SerprogError::Timeout("QMaxLen command timed out"))??;
+            Ok(())
+        }
+        SerprogCommand::QBustype => {
+            debug!("Received QBustype CMD");
+            let operation = async {
+                transport
                     .write(&[S_ACK, 0x08])
                     .await
                     .map_err(|_| SerprogError::TransportWrite("Error writing QBustype response"))?;
                 Ok(())
-            }
-            SerprogCommand::SyncNop => {
-                debug!("Received SyncNop CMD");
-                self.transport
+            };
+            with_timeout(COMMAND_TIMEOUT, operation)
+                .await
+                .map_err(|_| SerprogError::Timeout("QBustype command timed out"))??;
+            Ok(())
+        }
+        SerprogCommand::SyncNop => {
+            debug!("Received SyncNop CMD");
+            let operation = async {
+                transport
                     .write(&[S_NAK, S_ACK])
                     .await
                     .map_err(|_| SerprogError::TransportWrite("Error writing SyncNop response"))?;
                 Ok(())
-            }
-            SerprogCommand::SBustype => {
-                debug!("Received SBustype CMD");
-                let mut buf = [0u8; 1];
-                self.transport
-                    .read(&mut buf)
-                    .await
-                    .map_err(|_| SerprogError::TransportRead("Error reading SBustype data"))?;
-                if buf[0] == 0x08 {
-                    debug!("Received SBustype 'SPI'");
-                    self.transport
-                        .write(&[S_ACK])
-                        .await
-                        .map_err(|_| SerprogError::TransportWrite("Error writing SBustype ACK"))?;
-                } else {
-                    debug!("Received unknown SBustype");
-                    self.transport
-                        .write(&[S_NAK])
-                        .await
-                        .map_err(|_| SerprogError::TransportWrite("Error writing SBustype NAK"))?;
-                }
-                Ok(())
-            }
-            SerprogCommand::OSpiOp => {
-                debug!("Received OSpiOp CMD");
-                let mut sdata = [0_u8; 64];
-                self.transport
-                    .read(sdata.as_mut_slice())
-                    .await
-                    .map_err(|_| SerprogError::TransportRead("Error reading OSpiOp data"))?;
-
-                let op_slen = le_u24_to_u32(&sdata[0..3]) as usize;
-                let op_rlen = le_u24_to_u32(&sdata[3..6]) as usize;
-
-                let mut usb_rx_spi_tx_buf = [([0u8; 64], 0); 4];
-                let mut usb_rx_spi_tx_channel: Channel<'_, NoopRawMutex, ([u8; 64], usize)> =
-                    Channel::new(&mut usb_rx_spi_tx_buf);
-                let (usb_rx, spi_tx) = usb_rx_spi_tx_channel.split();
-
-                let mut usb_tx_spi_rx_buf = [([0u8; 64], 0); 8];
-                let mut usb_tx_spi_rx_channel: Channel<'_, NoopRawMutex, ([u8; 64], usize)> =
-                    Channel::new(&mut usb_tx_spi_rx_buf);
-                let (spi_rx, usb_tx) = usb_tx_spi_rx_channel.split();
-
-                let usb_task = async |transport: &mut T,
-                                      mut sender: Sender<NoopRawMutex, ([u8; 64], usize)>,
-                                      sdata_size: usize,
-                                      sdata_0: [u8; 64],
-                                      mut receiver: Receiver<NoopRawMutex, ([u8; 64], usize)>,
-                                      rdata_size: usize|
-                       -> Result<(), SerprogError> {
-                    // First block
-                    let mut data_to_read = sdata_size;
-                    {
-                        let (buf, size) = sender.send().await;
-                        let block_size = data_to_read.min(64 - 6);
-                        buf[..block_size].copy_from_slice(&sdata_0[6..6 + block_size]);
-                        *size = block_size;
-                        sender.send_done();
-                        data_to_read -= block_size;
-                    }
-
-                    while data_to_read > 0 {
-                        let read_size = data_to_read.min(64);
-                        let (buf, size) = sender.send().await;
-                        *size = read_size;
-                        transport.read(&mut buf[..read_size]).await.map_err(|_| {
-                            SerprogError::TransportRead("Error reading OSpiOp data")
-                        })?;
-                        sender.send_done();
-                        data_to_read -= read_size;
-                    }
+            };
+            with_timeout(COMMAND_TIMEOUT, operation)
+                .await
+                .map_err(|_| SerprogError::Timeout("SyncNop command timed out"))??;
+            Ok(())
+        }
+        SerprogCommand::SBustype => {
+            debug!("Received SBustype CMD");
+            let operation =
+                async {
+                    let mut buf = [0u8; 1];
                     transport
-                        .write(&[S_ACK])
+                        .read(&mut buf)
                         .await
-                        .map_err(|_| SerprogError::TransportWrite("Error writing SBustype ACK"))?;
-
-                    let mut data_to_send = rdata_size;
-                    while data_to_send > 0 {
-                        let (buf, size) = receiver.receive().await;
-                        let size = *size;
-                        transport.write(&buf[..size]).await.map_err(|_| {
-                            SerprogError::TransportWrite("Error writing SPI read data")
+                        .map_err(|_| SerprogError::TransportRead("Error reading SBustype data"))?;
+                    if buf[0] == 0x08 {
+                        debug!("Received SBustype 'SPI'");
+                        transport.write(&[S_ACK]).await.map_err(|_| {
+                            SerprogError::TransportWrite("Error writing SBustype ACK")
                         })?;
-                        receiver.receive_done();
-                        data_to_send -= size;
+                    } else {
+                        debug!("Received unknown SBustype");
+                        transport.write(&[S_NAK]).await.map_err(|_| {
+                            SerprogError::TransportWrite("Error writing SBustype NAK")
+                        })?;
                     }
                     Ok(())
                 };
+            with_timeout(COMMAND_TIMEOUT, operation)
+                .await
+                .map_err(|_| SerprogError::Timeout("SBustype command timed out"))??;
+            Ok(())
+        }
+        SerprogCommand::OSpiOp => {
+            debug!("Received OSpiOp CMD");
 
-                let spi_task = async |spi: &mut SPI,
-                                      mut receiver: Receiver<NoopRawMutex, ([u8; 64], usize)>,
-                                      sdata_size: usize,
-                                      mut sender: Sender<NoopRawMutex, ([u8; 64], usize)>,
-                                      rdata_size: usize,
-                                      cs: &mut CS|
-                       -> Result<(), SerprogError> {
-                    spi.flush().await.map_err(|_| {
-                        SerprogError::SpiFlush("Error flushing SPI before transfer")
-                    })?;
+            // Read directly into the first channel buffer
+            let mut usb_rx_spi_tx_buf = [const { Vec::<u8, TRANSFER_SIZE>::new() }; 4];
+            usb_rx_spi_tx_buf[0].resize(TRANSFER_SIZE, 0).ok();
+            with_timeout(
+                SPIOP_TIMEOUT,
+                transport.read(usb_rx_spi_tx_buf[0].as_mut_slice()),
+            )
+            .await
+            .map_err(|_| SerprogError::Timeout("Timeout reading OSpiOp header"))?
+            .map_err(|_| SerprogError::TransportRead("Error reading OSpiOp header"))?;
 
-                    cs.set_low()
-                        .map_err(|_| SerprogError::CsSetLow("Error setting CS low"))?;
-                    let mut data_to_write = sdata_size;
-                    while data_to_write > 0 {
-                        let (buf, size) = receiver.receive().await;
-                        data_to_write -= *size;
-                        spi.write(&buf[..*size])
-                            .await
-                            .map_err(|_| SerprogError::SpiTransfer("Error writing OSpiOp data"))?;
-                        receiver.receive_done();
-                    }
-                    let mut data_to_read = rdata_size;
-                    while data_to_read > 0 {
-                        let (buf, size) = sender.send().await;
-                        let read_size = data_to_read.min(buf.len());
-                        spi.read(&mut buf[..read_size])
-                            .await
-                            .map_err(|_| SerprogError::SpiTransfer("Error reading OSpiOp data"))?;
-                        *size = read_size;
-                        sender.send_done();
-                        data_to_read -= read_size;
-                    }
-                    cs.set_high()
-                        .map_err(|_| SerprogError::CsSetHigh("Error setting CS high"))?;
-                    debug!("OSpiOp CMD done");
-                    Ok(())
-                };
+            // Parse header from the first buffer
+            let op_slen = le_u24_to_u32(&usb_rx_spi_tx_buf[0][0..3]) as usize;
+            let op_rlen = le_u24_to_u32(&usb_rx_spi_tx_buf[0][3..6]) as usize;
 
-                let (spi_res, usb_res) = block_on(join(
-                    spi_task(
-                        &mut self.spi,
-                        spi_tx,
-                        op_slen,
-                        spi_rx,
-                        op_rlen,
-                        &mut self.cs,
-                    ),
-                    usb_task(&mut self.transport, usb_rx, op_slen, sdata, usb_tx, op_rlen),
-                ));
-                if let Err(spi_err) = spi_res {
-                    self.transport
-                        .write(&[S_NAK])
-                        .await
-                        .map_err(|_| SerprogError::TransportWrite("Failed to report SPI failed"))?;
-                    return Err(spi_err);
-                }
-                usb_res?;
+            let mut usb_rx_spi_tx_channel: Channel<'_, NoopRawMutex, Vec<u8, TRANSFER_SIZE>> =
+                Channel::new(&mut usb_rx_spi_tx_buf);
+            let (usb_rx, spi_tx) = usb_rx_spi_tx_channel.split();
 
-                Ok(())
+            let mut usb_tx_spi_rx_buf = [const { Vec::<u8, TRANSFER_SIZE>::new() }; 8];
+            let mut usb_tx_spi_rx_channel: Channel<'_, NoopRawMutex, Vec<u8, TRANSFER_SIZE>> =
+                Channel::new(&mut usb_tx_spi_rx_buf);
+            let (spi_rx, usb_tx) = usb_tx_spi_rx_channel.split();
+
+            // Acquire SPI device - pins are set to output mode
+            // When guard is dropped, pins will be set back to input mode
+            let mut spi_guard = spi_provider.acquire(*spi_freq_hz);
+            let (spi, cs) = spi_guard.spi_cs();
+
+            // Run both tasks concurrently
+            // If USB task times out, it returns an error and the SPI task will
+            // also complete (channel operations will unblock when counterpart completes)
+            let (spi_res, usb_res) = join(
+                ospiop_spi_task::<_, _, TRANSFER_SIZE>(spi, spi_tx, op_slen, spi_rx, op_rlen, cs),
+                ospiop_usb_task::<_, TRANSFER_SIZE>(transport, usb_rx, op_slen, usb_tx, op_rlen),
+            )
+            .await;
+
+            // Guard is dropped here, releasing the SPI pins back to input mode
+            drop(spi_guard);
+
+            // Check USB error first (timeout detection happens here)
+            usb_res?;
+
+            // Then check SPI error
+            if let Err(spi_err) = spi_res {
+                with_timeout(SPIOP_TIMEOUT, transport.write(&[S_NAK]))
+                    .await
+                    .map_err(|_| SerprogError::Timeout("Timeout reporting SPI error to host"))?
+                    .map_err(|_| SerprogError::TransportWrite("Failed to report SPI error"))?;
+                return Err(spi_err);
             }
-            SerprogCommand::SSpiFreq => {
-                debug!("Received SSpiFreq CMD");
+
+            Ok(())
+        }
+        SerprogCommand::SSpiFreq => {
+            debug!("Received SSpiFreq CMD");
+            let operation = async {
                 let mut request = SSpiFreqRequest::new_zeroed();
-                self.transport
+                transport
                     .read(request.as_mut_bytes())
                     .await
                     .map_err(|_| SerprogError::TransportRead("Error reading SSpiFreq data"))?;
 
-                // Parse the request using zerocopy
-                let try_freq = request.freq.get();
+                // Store the requested frequency for use when acquiring SPI
+                let requested_freq = request.freq.get();
+                *spi_freq_hz = requested_freq;
 
-                debug!("Setting SPI frequency: {:?}", try_freq);
-
-                // Call the frequency callback if set
-                if let Some(callback) = &mut self.freq_callback {
-                    (callback)(&mut self.spi, try_freq);
-                }
+                debug!("Setting SPI frequency: {:?}", requested_freq);
 
                 // Create and send response
                 let response = SSpiFreqResponse {
                     ack: S_ACK,
-                    freq: U32::new(try_freq), // TODO can we report what the hardware has set up?
+                    freq: U32::new(requested_freq),
                 };
 
-                self.transport
+                transport
                     .write(response.as_bytes())
                     .await
                     .map_err(|_| SerprogError::TransportWrite("Error writing SSpiFreq response"))?;
 
                 Ok(())
-            }
-            SerprogCommand::SPinState => {
-                debug!("Received SPinState CMD");
+            };
+            with_timeout(COMMAND_TIMEOUT, operation)
+                .await
+                .map_err(|_| SerprogError::Timeout("SSpiFreq command timed out"))??;
+            Ok(())
+        }
+        SerprogCommand::SPinState => {
+            debug!("Received SPinState CMD");
+            let operation = async {
                 let mut buf = [0u8; 1];
-                self.transport
+                transport
                     .read(&mut buf)
                     .await
                     .map_err(|_| SerprogError::TransportRead("Error reading SPinState data"))?;
+                let led = led_provider.led();
                 if buf[0] == 0 {
-                    self.led
-                        .set_low()
+                    led.set_low()
                         .map_err(|_| SerprogError::LedSetLow("Error setting LED low"))?;
                 } else {
-                    self.led
-                        .set_high()
+                    led.set_high()
                         .map_err(|_| SerprogError::LedSetHigh("Error setting LED high"))?;
                 }
-                self.transport
+                transport
                     .write(&[S_ACK])
                     .await
                     .map_err(|_| SerprogError::TransportWrite("Error writing SPinState ACK"))?;
 
                 Ok(())
-            }
-            _ => {
-                debug!("Received unknown CMD");
-                self.transport.write(&[S_NAK]).await.map_err(|_| {
+            };
+            with_timeout(COMMAND_TIMEOUT, operation)
+                .await
+                .map_err(|_| SerprogError::Timeout("SPinState command timed out"))??;
+            Ok(())
+        }
+        _ => {
+            debug!("Received unknown CMD");
+            let operation = async {
+                transport.write(&[S_NAK]).await.map_err(|_| {
                     SerprogError::TransportWrite("Error writing unknown command NAK")
                 })?;
-
                 Ok(())
-            }
+            };
+            with_timeout(COMMAND_TIMEOUT, operation)
+                .await
+                .map_err(|_| SerprogError::Timeout("Unknown command response timed out"))??;
+            Ok(())
         }
     }
 }

@@ -1528,6 +1528,7 @@ dependencies = [
  "embassy-usb",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
+ "heapless 0.9.1",
  "num_enum",
  "tock-registers",
  "zerocopy 0.8.17",

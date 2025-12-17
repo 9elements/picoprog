@@ -11,6 +11,7 @@ embassy-sync.workspace = true
 embedded-hal.workspace = true
 embedded-hal-async.workspace = true
 #log.workspace = true
+heapless.workspace = true
 defmt.workspace = true
 num_enum.workspace = true
 tock-registers.workspace = true

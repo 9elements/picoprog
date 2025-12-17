@@ -7,6 +7,7 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::zerocopy_channel::{Channel, Receiver, Sender};
 use embedded_hal::digital::OutputPin;
 use embedded_hal_async::spi::SpiBus;
+use heapless::Vec;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use tock_registers::register_bitfields;
 use tock_registers::LocalRegisterCopy;
@@ -341,48 +342,46 @@ where
             }
             SerprogCommand::OSpiOp => {
                 debug!("Received OSpiOp CMD");
-                let mut sdata = [0_u8; 64];
+
+                // Read directly into the first channel buffer
+                let mut usb_rx_spi_tx_buf = [const { Vec::<u8, 64>::new() }; 4];
+                usb_rx_spi_tx_buf[0].resize(64, 0).ok();
                 self.transport
-                    .read(sdata.as_mut_slice())
+                    .read(usb_rx_spi_tx_buf[0].as_mut_slice())
                     .await
                     .map_err(|_| SerprogError::TransportRead("Error reading OSpiOp data"))?;
 
-                let op_slen = le_u24_to_u32(&sdata[0..3]) as usize;
-                let op_rlen = le_u24_to_u32(&sdata[3..6]) as usize;
+                // Parse header from the first buffer
+                let op_slen = le_u24_to_u32(&usb_rx_spi_tx_buf[0][0..3]) as usize;
+                let op_rlen = le_u24_to_u32(&usb_rx_spi_tx_buf[0][3..6]) as usize;
 
-                let mut usb_rx_spi_tx_buf = [([0u8; 64], 0); 4];
-                let mut usb_rx_spi_tx_channel: Channel<'_, NoopRawMutex, ([u8; 64], usize)> =
+                let mut usb_rx_spi_tx_channel: Channel<'_, NoopRawMutex, Vec<u8, 64>> =
                     Channel::new(&mut usb_rx_spi_tx_buf);
                 let (usb_rx, spi_tx) = usb_rx_spi_tx_channel.split();
 
-                let mut usb_tx_spi_rx_buf = [([0u8; 64], 0); 8];
-                let mut usb_tx_spi_rx_channel: Channel<'_, NoopRawMutex, ([u8; 64], usize)> =
+                let mut usb_tx_spi_rx_buf = [const { Vec::<u8, 64>::new() }; 8];
+                let mut usb_tx_spi_rx_channel: Channel<'_, NoopRawMutex, Vec<u8, 64>> =
                     Channel::new(&mut usb_tx_spi_rx_buf);
                 let (spi_rx, usb_tx) = usb_tx_spi_rx_channel.split();
 
                 let usb_task = async |transport: &mut T,
-                                      mut sender: Sender<NoopRawMutex, ([u8; 64], usize)>,
+                                      mut sender: Sender<NoopRawMutex, Vec<u8, 64>>,
                                       sdata_size: usize,
-                                      sdata_0: [u8; 64],
-                                      mut receiver: Receiver<NoopRawMutex, ([u8; 64], usize)>,
+                                      mut receiver: Receiver<NoopRawMutex, Vec<u8, 64>>,
                                       rdata_size: usize|
                        -> Result<(), SerprogError> {
-                    // First block
+                    // First block - already contains header + initial data, send as-is
                     let mut data_to_read = sdata_size;
-                    {
-                        let (buf, size) = sender.send().await;
-                        let block_size = data_to_read.min(64 - 6);
-                        buf[..block_size].copy_from_slice(&sdata_0[6..6 + block_size]);
-                        *size = block_size;
-                        sender.send_done();
-                        data_to_read -= block_size;
-                    }
+                    let first_block_data_size = data_to_read.min(64 - 6);
+                    sender.send_done();
+                    data_to_read -= first_block_data_size;
 
                     while data_to_read > 0 {
                         let read_size = data_to_read.min(64);
-                        let (buf, size) = sender.send().await;
-                        *size = read_size;
-                        transport.read(&mut buf[..read_size]).await.map_err(|_| {
+                        let buf = sender.send().await;
+                        buf.clear();
+                        buf.resize(read_size, 0).ok();
+                        transport.read(buf.as_mut_slice()).await.map_err(|_| {
                             SerprogError::TransportRead("Error reading OSpiOp data")
                         })?;
                         sender.send_done();
@@ -395,21 +394,20 @@ where
 
                     let mut data_to_send = rdata_size;
                     while data_to_send > 0 {
-                        let (buf, size) = receiver.receive().await;
-                        let size = *size;
-                        transport.write(&buf[..size]).await.map_err(|_| {
+                        let buf = receiver.receive().await;
+                        transport.write(buf.as_slice()).await.map_err(|_| {
                             SerprogError::TransportWrite("Error writing SPI read data")
                         })?;
+                        data_to_send -= buf.len();
                         receiver.receive_done();
-                        data_to_send -= size;
                     }
                     Ok(())
                 };
 
                 let spi_task = async |spi: &mut SPI,
-                                      mut receiver: Receiver<NoopRawMutex, ([u8; 64], usize)>,
+                                      mut receiver: Receiver<NoopRawMutex, Vec<u8, 64>>,
                                       sdata_size: usize,
-                                      mut sender: Sender<NoopRawMutex, ([u8; 64], usize)>,
+                                      mut sender: Sender<NoopRawMutex, Vec<u8, 64>>,
                                       rdata_size: usize,
                                       cs: &mut CS|
                        -> Result<(), SerprogError> {
@@ -420,22 +418,34 @@ where
                     cs.set_low()
                         .map_err(|_| SerprogError::CsSetLow("Error setting CS low"))?;
                     let mut data_to_write = sdata_size;
+                    let mut is_first = true;
                     while data_to_write > 0 {
-                        let (buf, size) = receiver.receive().await;
-                        data_to_write -= *size;
-                        spi.write(&buf[..*size])
+                        let buf = receiver.receive().await;
+                        let write_slice = if is_first {
+                            // First buffer: skip the 6-byte header
+                            is_first = false;
+                            let data_len = data_to_write.min(64 - 6);
+                            data_to_write -= data_len;
+                            &buf[6..6 + data_len]
+                        } else {
+                            // Subsequent buffers: use entire buffer
+                            data_to_write -= buf.len();
+                            buf.as_slice()
+                        };
+                        spi.write(write_slice)
                             .await
                             .map_err(|_| SerprogError::SpiTransfer("Error writing OSpiOp data"))?;
                         receiver.receive_done();
                     }
                     let mut data_to_read = rdata_size;
                     while data_to_read > 0 {
-                        let (buf, size) = sender.send().await;
-                        let read_size = data_to_read.min(buf.len());
-                        spi.read(&mut buf[..read_size])
+                        let buf = sender.send().await;
+                        buf.clear();
+                        let read_size = data_to_read.min(64);
+                        buf.resize(read_size, 0).ok();
+                        spi.read(buf.as_mut_slice())
                             .await
                             .map_err(|_| SerprogError::SpiTransfer("Error reading OSpiOp data"))?;
-                        *size = read_size;
                         sender.send_done();
                         data_to_read -= read_size;
                     }
@@ -454,7 +464,7 @@ where
                         op_rlen,
                         &mut self.cs,
                     ),
-                    usb_task(&mut self.transport, usb_rx, op_slen, sdata, usb_tx, op_rlen),
+                    usb_task(&mut self.transport, usb_rx, op_slen, usb_tx, op_rlen),
                 ));
                 if let Err(spi_err) = spi_res {
                     self.transport

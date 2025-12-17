@@ -51,6 +51,7 @@ assign_resources! {
 }
 
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
+const USB_BUFFER_SIZE: usize = 64;
 
 // According to Serial Flasher Protocol Specification - version 1
 
@@ -106,13 +107,13 @@ async fn main(spawner: Spawner) {
     let uart_class = {
         static STATE: StaticCell<State> = StaticCell::new();
         let state = STATE.init(State::new());
-        CdcAcmClass::new(&mut builder, state, 64)
+        CdcAcmClass::new(&mut builder, state, USB_BUFFER_SIZE.try_into().unwrap())
     };
 
     let serprog_class = {
         static STATE: StaticCell<State> = StaticCell::new();
         let state = STATE.init(State::new());
-        CdcAcmClass::new(&mut builder, state, 64)
+        CdcAcmClass::new(&mut builder, state, USB_BUFFER_SIZE.try_into().unwrap())
     };
 
     let usb = builder.build();
@@ -166,7 +167,13 @@ async fn serprog_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiResour
         spi.set_frequency(freq);
     };
 
-    let serprog = serprog::Serprog::new(spi, cs, led, class, Some(set_freq_cb));
+    let serprog = serprog::Serprog::<_, _, _, _, _, USB_BUFFER_SIZE>::new(
+        spi,
+        cs,
+        led,
+        class,
+        Some(set_freq_cb),
+    );
     serprog.run_loop().await
 }
 

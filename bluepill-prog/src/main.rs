@@ -50,6 +50,8 @@ assign_resources! {
     }
 }
 
+const USB_BUFFER_SIZE: usize = 64;
+
 // According to Serial Flasher Protocol Specification - version 1
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -131,7 +133,7 @@ async fn main(spawner: Spawner) {
     let serprog_class = {
         static STATE: StaticCell<State> = StaticCell::new();
         let state = STATE.init(State::new());
-        CdcAcmClass::new(&mut builder, state, 64)
+        CdcAcmClass::new(&mut builder, state, USB_BUFFER_SIZE.try_into().unwrap())
     };
 
     let usb = builder.build();
@@ -190,7 +192,13 @@ async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiRe
 
     loop {
         class.wait_connection().await;
-        let serprog = serprog::Serprog::new(spi, cs, led, class, Some(set_freq_cb));
+        let serprog = serprog::Serprog::<_, _, _, _, _, USB_BUFFER_SIZE>::new(
+            spi,
+            cs,
+            led,
+            class,
+            Some(set_freq_cb),
+        );
         serprog.run_loop().await
     }
 }

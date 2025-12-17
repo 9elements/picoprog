@@ -199,7 +199,7 @@ impl QCmdMapResponse {
     }
 }
 
-pub struct Serprog<SPI, CS, LED, T: Transport, F> {
+pub struct Serprog<SPI, CS, LED, T: Transport<TRANSFER_SIZE>, F, const TRANSFER_SIZE: usize> {
     spi: SPI,
     cs: CS,
     led: LED,
@@ -207,21 +207,21 @@ pub struct Serprog<SPI, CS, LED, T: Transport, F> {
     freq_callback: Option<F>,
 }
 
-async fn ospiop_usb_task<T: Transport>(
+async fn ospiop_usb_task<T: Transport<TRANSFER_SIZE>, const TRANSFER_SIZE: usize>(
     transport: &mut T,
-    mut sender: Sender<'_, NoopRawMutex, Vec<u8, 64>>,
+    mut sender: Sender<'_, NoopRawMutex, Vec<u8, TRANSFER_SIZE>>,
     sdata_size: usize,
-    mut receiver: Receiver<'_, NoopRawMutex, Vec<u8, 64>>,
+    mut receiver: Receiver<'_, NoopRawMutex, Vec<u8, TRANSFER_SIZE>>,
     rdata_size: usize,
 ) -> Result<(), SerprogError> {
     // First block - already contains header + initial data, send as-is
     let mut data_to_read = sdata_size;
-    let first_block_data_size = data_to_read.min(64 - 6);
+    let first_block_data_size = data_to_read.min(TRANSFER_SIZE - 6);
     sender.send_done();
     data_to_read -= first_block_data_size;
 
     while data_to_read > 0 {
-        let read_size = data_to_read.min(64);
+        let read_size = data_to_read.min(TRANSFER_SIZE);
         let buf = sender.send().await;
         buf.clear();
         buf.resize(read_size, 0).ok();
@@ -250,11 +250,11 @@ async fn ospiop_usb_task<T: Transport>(
     Ok(())
 }
 
-async fn ospiop_spi_task<SPI: SpiBus<u8>, CS: OutputPin>(
+async fn ospiop_spi_task<SPI: SpiBus<u8>, CS: OutputPin, const TRANSFER_SIZE: usize>(
     spi: &mut SPI,
-    mut receiver: Receiver<'_, NoopRawMutex, Vec<u8, 64>>,
+    mut receiver: Receiver<'_, NoopRawMutex, Vec<u8, TRANSFER_SIZE>>,
     sdata_size: usize,
-    mut sender: Sender<'_, NoopRawMutex, Vec<u8, 64>>,
+    mut sender: Sender<'_, NoopRawMutex, Vec<u8, TRANSFER_SIZE>>,
     rdata_size: usize,
     cs: &mut CS,
 ) -> Result<(), SerprogError> {
@@ -271,7 +271,7 @@ async fn ospiop_spi_task<SPI: SpiBus<u8>, CS: OutputPin>(
         let write_slice = if is_first {
             // First buffer: skip the 6-byte header
             is_first = false;
-            let data_len = data_to_write.min(64 - 6);
+            let data_len = data_to_write.min(TRANSFER_SIZE - 6);
             data_to_write -= data_len;
             &buf[6..6 + data_len]
         } else {
@@ -288,7 +288,7 @@ async fn ospiop_spi_task<SPI: SpiBus<u8>, CS: OutputPin>(
     while data_to_read > 0 {
         let buf = sender.send().await;
         buf.clear();
-        let read_size = data_to_read.min(64);
+        let read_size = data_to_read.min(TRANSFER_SIZE);
         buf.resize(read_size, 0).ok();
         spi.read(buf.as_mut_slice())
             .await
@@ -302,12 +302,12 @@ async fn ospiop_spi_task<SPI: SpiBus<u8>, CS: OutputPin>(
     Ok(())
 }
 
-impl<SPI, CS, LED, T, F> Serprog<SPI, CS, LED, T, F>
+impl<SPI, CS, LED, T, F, const TRANSFER_SIZE: usize> Serprog<SPI, CS, LED, T, F, TRANSFER_SIZE>
 where
     SPI: SpiBus<u8>,
     CS: OutputPin,
     LED: OutputPin,
-    T: Transport,
+    T: Transport<TRANSFER_SIZE>,
     F: FnMut(&mut SPI, u32) + Send + Sync,
 {
     pub fn new(spi: SPI, cs: CS, led: LED, transport: T, freq_callback: Option<F>) -> Self {
@@ -320,7 +320,11 @@ where
         }
     }
 
-    pub async fn run_loop(mut self) -> ! {
+    pub async fn run_loop(mut self) -> !
+    where
+        CS::Error: core::fmt::Debug,
+        LED::Error: core::fmt::Debug,
+    {
         let mut buf = [0; 1];
 
         loop {
@@ -439,8 +443,8 @@ where
                 debug!("Received OSpiOp CMD");
 
                 // Read directly into the first channel buffer
-                let mut usb_rx_spi_tx_buf = [const { Vec::<u8, 64>::new() }; 4];
-                usb_rx_spi_tx_buf[0].resize(64, 0).ok();
+                let mut usb_rx_spi_tx_buf = [const { Vec::<u8, TRANSFER_SIZE>::new() }; 4];
+                usb_rx_spi_tx_buf[0].resize(TRANSFER_SIZE, 0).ok();
                 self.transport
                     .read(usb_rx_spi_tx_buf[0].as_mut_slice())
                     .await
@@ -450,17 +454,17 @@ where
                 let op_slen = le_u24_to_u32(&usb_rx_spi_tx_buf[0][0..3]) as usize;
                 let op_rlen = le_u24_to_u32(&usb_rx_spi_tx_buf[0][3..6]) as usize;
 
-                let mut usb_rx_spi_tx_channel: Channel<'_, NoopRawMutex, Vec<u8, 64>> =
+                let mut usb_rx_spi_tx_channel: Channel<'_, NoopRawMutex, Vec<u8, TRANSFER_SIZE>> =
                     Channel::new(&mut usb_rx_spi_tx_buf);
                 let (usb_rx, spi_tx) = usb_rx_spi_tx_channel.split();
 
-                let mut usb_tx_spi_rx_buf = [const { Vec::<u8, 64>::new() }; 8];
-                let mut usb_tx_spi_rx_channel: Channel<'_, NoopRawMutex, Vec<u8, 64>> =
+                let mut usb_tx_spi_rx_buf = [const { Vec::<u8, TRANSFER_SIZE>::new() }; 8];
+                let mut usb_tx_spi_rx_channel: Channel<'_, NoopRawMutex, Vec<u8, TRANSFER_SIZE>> =
                     Channel::new(&mut usb_tx_spi_rx_buf);
                 let (spi_rx, usb_tx) = usb_tx_spi_rx_channel.split();
 
                 let (spi_res, usb_res) = block_on(join(
-                    ospiop_spi_task(
+                    ospiop_spi_task::<_, _, TRANSFER_SIZE>(
                         &mut self.spi,
                         spi_tx,
                         op_slen,
@@ -468,7 +472,13 @@ where
                         op_rlen,
                         &mut self.cs,
                     ),
-                    ospiop_usb_task(&mut self.transport, usb_rx, op_slen, usb_tx, op_rlen),
+                    ospiop_usb_task::<_, TRANSFER_SIZE>(
+                        &mut self.transport,
+                        usb_rx,
+                        op_slen,
+                        usb_tx,
+                        op_rlen,
+                    ),
                 ));
                 if let Err(spi_err) = spi_res {
                     self.transport

@@ -107,13 +107,13 @@ async fn main(spawner: Spawner) {
     let uart_class = {
         static STATE: StaticCell<State> = StaticCell::new();
         let state = STATE.init(State::new());
-        CdcAcmClass::new(&mut builder, state, USB_BUFFER_SIZE.try_into().unwrap())
+        CdcAcmClass::new(&mut builder, state, USB_BUFFER_SIZE as u16)
     };
 
     let serprog_class = {
         static STATE: StaticCell<State> = StaticCell::new();
         let state = STATE.init(State::new());
-        CdcAcmClass::new(&mut builder, state, USB_BUFFER_SIZE.try_into().unwrap())
+        CdcAcmClass::new(&mut builder, state, USB_BUFFER_SIZE as u16)
     };
 
     let usb = builder.build();

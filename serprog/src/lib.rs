@@ -217,6 +217,8 @@ async fn ospiop_usb_task<T: Transport<TRANSFER_SIZE>, const TRANSFER_SIZE: usize
     // First block - already contains header + initial data, send as-is
     let mut data_to_read = sdata_size;
     let first_block_data_size = data_to_read.min(TRANSFER_SIZE - 6);
+    // Acquire the pre-populated buffer per channel protocol, but do not modify it.
+    let _ = sender.send().await;
     sender.send_done();
     data_to_read -= first_block_data_size;
 
@@ -224,7 +226,8 @@ async fn ospiop_usb_task<T: Transport<TRANSFER_SIZE>, const TRANSFER_SIZE: usize
         let read_size = data_to_read.min(TRANSFER_SIZE);
         let buf = sender.send().await;
         buf.clear();
-        buf.resize(read_size, 0).ok();
+        buf.resize(read_size, 0)
+            .map_err(|_| SerprogError::TransportRead("Error resizing OSpiOp read buffer"))?;
         transport
             .read(buf.as_mut_slice())
             .await
@@ -235,7 +238,7 @@ async fn ospiop_usb_task<T: Transport<TRANSFER_SIZE>, const TRANSFER_SIZE: usize
     transport
         .write(&[S_ACK])
         .await
-        .map_err(|_| SerprogError::TransportWrite("Error writing SBustype ACK"))?;
+        .map_err(|_| SerprogError::TransportWrite("Error writing OSpiOp ACK"))?;
 
     let mut data_to_send = rdata_size;
     while data_to_send > 0 {
@@ -289,7 +292,8 @@ async fn ospiop_spi_task<SPI: SpiBus<u8>, CS: OutputPin, const TRANSFER_SIZE: us
         let buf = sender.send().await;
         buf.clear();
         let read_size = data_to_read.min(TRANSFER_SIZE);
-        buf.resize(read_size, 0).ok();
+        buf.resize(read_size, 0)
+            .map_err(|_| SerprogError::SpiTransfer("Error resizing OSpiOp SPI read buffer"))?;
         spi.read(buf.as_mut_slice())
             .await
             .map_err(|_| SerprogError::SpiTransfer("Error reading OSpiOp data"))?;
@@ -444,7 +448,9 @@ where
 
                 // Read directly into the first channel buffer
                 let mut usb_rx_spi_tx_buf = [const { Vec::<u8, TRANSFER_SIZE>::new() }; 4];
-                usb_rx_spi_tx_buf[0].resize(TRANSFER_SIZE, 0).ok();
+                usb_rx_spi_tx_buf[0]
+                    .resize(TRANSFER_SIZE, 0)
+                    .map_err(|_| SerprogError::TransportRead("Error resizing OSpiOp buffer"))?;
                 self.transport
                     .read(usb_rx_spi_tx_buf[0].as_mut_slice())
                     .await

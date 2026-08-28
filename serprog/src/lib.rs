@@ -38,7 +38,8 @@ fn le_u24_to_u32(bytes: &[u8]) -> u32 {
 
 const S_ACK: u8 = 0x06;
 const S_NAK: u8 = 0x15;
-const MAX_BUFFER_SIZE: usize = 16 << 20;
+// 16 MiB minus one: the protocol's 24-bit length field cannot express 2^24.
+const MAX_BUFFER_SIZE: usize = (16 << 20) - 1;
 
 #[derive(FromBytes, IntoBytes, Unaligned, Immutable)]
 #[repr(C, packed)]

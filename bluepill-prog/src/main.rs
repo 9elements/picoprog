@@ -11,7 +11,7 @@ use core::panic::PanicInfo;
 use cortex_m::peripheral::SCB;
 use embassy_executor::Spawner;
 use embassy_stm32::bind_interrupts;
-use embassy_stm32::gpio::{Level, Output, Speed};
+use embassy_stm32::gpio::{Flex, Level, Output, Speed};
 use embassy_stm32::peripherals::{self, USB};
 use embassy_stm32::spi::{Config as SpiConfig, Spi};
 use embassy_stm32::time::Hertz;
@@ -153,41 +153,105 @@ async fn usb_task(mut usb: CustomUsbDevice) -> ! {
     usb.run().await
 }
 
-#[embassy_executor::task]
-async fn serprog_task(mut class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiResources) -> ! {
-    let mut config = SpiConfig::default();
-    config.frequency = Hertz(12_000_000); // 12 MHz
+/// Provider for SPI device that creates SPI on demand
+struct SpiProvider {
+    peripheral: Peri<'static, peripherals::SPI1>,
+    clk: Peri<'static, peripherals::PA5>,
+    mosi: Peri<'static, peripherals::PA7>,
+    miso: Peri<'static, peripherals::PA6>,
+    mosi_dma: Peri<'static, peripherals::DMA1_CH3>,
+    miso_dma: Peri<'static, peripherals::DMA1_CH2>,
+    cs: Peri<'static, peripherals::PA4>,
+}
 
-    let spi = Spi::new(
-        r.peripheral,
-        r.clk,
-        r.mosi,
-        r.miso,
-        r.mosi_dma,
-        r.miso_dma,
-        config,
-    );
-    let cs = Output::new(r.cs, Level::High, Speed::Low);
-    let led = Output::new(r.led, Level::Low, Speed::Low);
+/// Reset a GPIO pin to analog/high-impedance state on STM32.
+/// We create a Flex from a stolen AnyPin and immediately drop it,
+/// which calls set_as_disconnected() (analog mode).
+fn reset_pin_stm32(pin_port: u8) {
+    use embassy_stm32::gpio::AnyPin;
 
-    // Define a callback function to set the SPI frequency
-    let set_freq_cb = move |spi: &mut Spi<'_, embassy_stm32::mode::Async>, freq| {
+    // SAFETY: We're resetting a pin we logically own. The Peri for this pin
+    // was already used to create SPI/Output which are about to be dropped.
+    // Creating a temporary AnyPin to reset it is safe.
+    // AnyPin::steal returns Peri<'static, AnyPin>
+    let peri = unsafe { AnyPin::steal(pin_port) };
+    // Create Flex - when Flex drops it calls set_as_disconnected() (analog mode)
+    let _ = Flex::new(peri);
+}
+
+impl serprog::SpiDeviceProvider for SpiProvider {
+    type Guard<'a>
+        = SpiGuard<'a>
+    where
+        Self: 'a;
+
+    fn acquire(&mut self, freq_hz: u32) -> Self::Guard<'_> {
         let mut config = SpiConfig::default();
-        config.frequency = Hertz(freq);
-        let _ = spi.set_config(&config);
-    };
+        config.frequency = Hertz(freq_hz);
 
-    loop {
-        class.wait_connection().await;
-        let serprog = serprog::Serprog::<_, _, _, _, _, USB_BUFFER_SIZE>::new(
+        // Reborrow the peripherals - pins are now configured as SPI outputs
+        let spi = Spi::new(
+            self.peripheral.reborrow(),
+            self.clk.reborrow(),
+            self.mosi.reborrow(),
+            self.miso.reborrow(),
+            self.mosi_dma.reborrow(),
+            self.miso_dma.reborrow(),
+            config,
+        );
+        let cs = Output::new(self.cs.reborrow(), Level::High, Speed::Low);
+
+        SpiGuard {
             spi,
             cs,
-            led,
-            class,
-            Some(set_freq_cb),
-        );
-        serprog.run_loop().await
+            // Store pin_port values for reset on drop
+            // Port A = 0, so PA4=4, PA5=5, PA6=6, PA7=7
+            pin_ports: [5, 7, 6, 4], // CLK=PA5, MOSI=PA7, MISO=PA6, CS=PA4
+        }
     }
+}
+
+/// Guard that holds SPI and CS, resetting pins to high-impedance (analog) on drop.
+struct SpiGuard<'a> {
+    spi: Spi<'a, embassy_stm32::mode::Async>,
+    cs: Output<'a>,
+    /// Pin port values to reset on drop: [CLK, MOSI, MISO, CS]
+    pin_ports: [u8; 4],
+}
+
+impl<'a> serprog::SpiCsGuard for SpiGuard<'a> {
+    type Spi = Spi<'a, embassy_stm32::mode::Async>;
+    type Cs = Output<'a>;
+
+    fn spi_cs(&mut self) -> (&mut Self::Spi, &mut Self::Cs) {
+        (&mut self.spi, &mut self.cs)
+    }
+}
+
+impl Drop for SpiGuard<'_> {
+    fn drop(&mut self) {
+        // Reset all SPI pins to analog/high-impedance state
+        for &pin_port in &self.pin_ports {
+            reset_pin_stm32(pin_port);
+        }
+    }
+}
+
+#[embassy_executor::task]
+async fn serprog_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiResources) -> ! {
+    let spi_provider = SpiProvider {
+        peripheral: r.peripheral,
+        clk: r.clk,
+        mosi: r.mosi,
+        miso: r.miso,
+        mosi_dma: r.mosi_dma,
+        miso_dma: r.miso_dma,
+        cs: r.cs,
+    };
+
+    let led = Output::new(r.led, Level::Low, Speed::Low);
+
+    serprog::run_loop::<_, _, _, USB_BUFFER_SIZE>(spi_provider, led, class).await
 }
 
 #[panic_handler]

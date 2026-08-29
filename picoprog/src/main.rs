@@ -133,35 +133,112 @@ async fn usb_task(mut usb: CustomUsbDevice) -> ! {
     usb.run().await
 }
 
+/// Provider for SPI device that creates SPI on demand
+struct SpiProvider {
+    peripheral: Peri<'static, SPI0>,
+    clk: Peri<'static, peripherals::PIN_2>,
+    mosi: Peri<'static, peripherals::PIN_3>,
+    miso: Peri<'static, peripherals::PIN_4>,
+    mosi_dma: Peri<'static, peripherals::DMA_CH2>,
+    miso_dma: Peri<'static, peripherals::DMA_CH3>,
+    cs: Peri<'static, peripherals::PIN_5>,
+}
+
+/// Reset a GPIO pin to disconnected/high-impedance state on RP2040.
+/// This mimics what Flex::drop() does.
+fn reset_pin_rp2040(pin: u8) {
+    use embassy_rp::pac;
+    let io = pac::IO_BANK0;
+    let pads = pac::PADS_BANK0;
+
+    // Reset pad control to defaults
+    pads.gpio(pin as usize).write(|_| {});
+
+    // Set function select to NULL (disconnected) and reset overrides
+    io.gpio(pin as usize).ctrl().write(|w| {
+        w.set_funcsel(pac::io::vals::Gpio0ctrlFuncsel::NULL as _);
+        w.set_inover(pac::io::vals::Inover::NORMAL);
+        w.set_outover(pac::io::vals::Outover::NORMAL);
+    });
+}
+
+impl serprog::SpiDeviceProvider for SpiProvider {
+    type Guard<'a>
+        = SpiGuard<'a>
+    where
+        Self: 'a;
+
+    fn acquire(&mut self, freq_hz: u32) -> Self::Guard<'_> {
+        let mut config = SpiConfig::default();
+        config.frequency = freq_hz;
+
+        // Reborrow the peripherals - pins are now configured as SPI outputs
+        let spi = Spi::new(
+            self.peripheral.reborrow(),
+            self.clk.reborrow(),
+            self.mosi.reborrow(),
+            self.miso.reborrow(),
+            self.mosi_dma.reborrow(),
+            self.miso_dma.reborrow(),
+            config,
+        );
+        let cs = Output::new(self.cs.reborrow(), Level::High);
+
+        SpiGuard {
+            spi,
+            cs,
+            // Store pin numbers for reset on drop
+            pin_nums: [2, 3, 4, 5], // CLK=2, MOSI=3, MISO=4, CS=5
+        }
+    }
+}
+
+/// Guard that holds SPI and CS, resetting pins to high-impedance (disconnected) on drop.
+struct SpiGuard<'a> {
+    spi: Spi<'a, SPI0, embassy_rp::spi::Async>,
+    cs: Output<'a>,
+    /// Pin numbers to reset on drop: [CLK, MOSI, MISO, CS]
+    pin_nums: [u8; 4],
+}
+
+impl<'a> serprog::SpiCsGuard for SpiGuard<'a> {
+    type Spi = Spi<'a, SPI0, embassy_rp::spi::Async>;
+    type Cs = Output<'a>;
+
+    fn spi_cs(&mut self) -> (&mut Self::Spi, &mut Self::Cs) {
+        (&mut self.spi, &mut self.cs)
+    }
+}
+
+impl<'a> Drop for SpiGuard<'a> {
+    fn drop(&mut self) {
+        // Note: spi and cs are dropped automatically after this function returns.
+        // We reset pins here, but the actual SPI peripheral drop happens after.
+        // This is fine because we're just resetting GPIO config, and the SPI
+        // peripheral doesn't hold any GPIO state that would conflict.
+
+        // Reset all SPI pins to disconnected/high-impedance state
+        for &pin in &self.pin_nums {
+            reset_pin_rp2040(pin);
+        }
+    }
+}
+
 #[embassy_executor::task]
 async fn serprog_task(class: CdcAcmClass<'static, CustomUsbDriver>, r: SpiResources) -> ! {
-    let mut config = SpiConfig::default();
-    config.frequency = 12_000_000; // 12 MHz
-
-    let spi = Spi::new(
-        r.peripheral,
-        r.clk,
-        r.mosi,
-        r.miso,
-        r.mosi_dma,
-        r.miso_dma,
-        config,
-    );
-    let cs = Output::new(r.cs, Level::High);
-    let led = Output::new(r.led, Level::Low);
-
-    let set_freq_cb = move |spi: &mut Spi<'_, SPI0, embassy_rp::spi::Async>, freq| {
-        spi.set_frequency(freq);
+    let spi_provider = SpiProvider {
+        peripheral: r.peripheral,
+        clk: r.clk,
+        mosi: r.mosi,
+        miso: r.miso,
+        mosi_dma: r.mosi_dma,
+        miso_dma: r.miso_dma,
+        cs: r.cs,
     };
 
-    let serprog = serprog::Serprog::<_, _, _, _, _, USB_BUFFER_SIZE>::new(
-        spi,
-        cs,
-        led,
-        class,
-        Some(set_freq_cb),
-    );
-    serprog.run_loop().await
+    let led = Output::new(r.led, Level::Low);
+
+    serprog::run_loop::<_, _, _, USB_BUFFER_SIZE>(spi_provider, led, class).await
 }
 
 #[panic_handler]

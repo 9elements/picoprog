@@ -1,6 +1,5 @@
 #![no_std]
 
-use core::convert::From;
 use core::result::Result::{Err, Ok};
 use embassy_futures::{block_on, join::join};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -163,7 +162,7 @@ register_bitfields! [u32,
 ];
 
 impl QCmdMapResponse {
-    fn new(has_freq_callback: bool) -> Self {
+    fn new() -> Self {
         let mut response = Self {
             ack: S_ACK,
             map: [0; 4],
@@ -172,7 +171,7 @@ impl QCmdMapResponse {
 
         // Set supported commands using tock-registers
         let mut cmdmap = LocalRegisterCopy::<u32, Commands::Register>::new(0);
-        let mut cmd_flags = Commands::Nop::SET
+        let cmd_flags = Commands::Nop::SET
             + Commands::QIface::SET
             + Commands::QCmdMap::SET
             + Commands::QPgmName::SET
@@ -183,11 +182,8 @@ impl QCmdMapResponse {
             + Commands::QRdNMaxLen::SET
             + Commands::OSpiOp::SET
             + Commands::SBustype::SET
-            + Commands::SPinState::SET;
-
-        if has_freq_callback {
-            cmd_flags += Commands::SSpiFreq::SET;
-        }
+            + Commands::SPinState::SET
+            + Commands::SSpiFreq::SET;
 
         cmdmap.modify(cmd_flags);
 
@@ -199,12 +195,79 @@ impl QCmdMapResponse {
     }
 }
 
-pub struct Serprog<SPI, CS, LED, T: Transport<TRANSFER_SIZE>, F, const TRANSFER_SIZE: usize> {
-    spi: SPI,
-    cs: CS,
-    led: LED,
-    transport: T,
-    freq_callback: Option<F>,
+/// Trait for a guard that provides access to SPI and CS.
+/// When the guard is dropped, the pins should be set back to input mode.
+pub trait SpiCsGuard {
+    type Spi: SpiBus<u8>;
+    type Cs: OutputPin;
+
+    /// Get mutable references to the SPI bus and CS pin.
+    fn spi_cs(&mut self) -> (&mut Self::Spi, &mut Self::Cs);
+}
+
+/// Generic implementation of `SpiCsGuard` that holds an SPI bus and CS pin.
+///
+/// **Important**: This basic implementation does NOT reset pins to input/high-impedance
+/// mode when dropped. Embassy's SPI and Output types do not automatically reset pins
+/// on drop. If you need pin cleanup (recommended to avoid interfering with the target
+/// board), implement a custom guard that resets pins in its `Drop` implementation.
+///
+/// See the picoprog and bluepill-prog examples for how to properly reset pins on drop.
+pub struct SpiCsGuardImpl<SPI, CS> {
+    pub spi: SPI,
+    pub cs: CS,
+}
+
+impl<SPI, CS> SpiCsGuardImpl<SPI, CS> {
+    /// Create a new guard.
+    ///
+    /// **Warning**: Pins will NOT be automatically reset to input mode when dropped.
+    /// Consider implementing a custom guard if you need pin cleanup.
+    pub fn new(spi: SPI, cs: CS) -> Self {
+        Self { spi, cs }
+    }
+}
+
+impl<SPI: SpiBus<u8>, CS: OutputPin> SpiCsGuard for SpiCsGuardImpl<SPI, CS> {
+    type Spi = SPI;
+    type Cs = CS;
+
+    fn spi_cs(&mut self) -> (&mut Self::Spi, &mut Self::Cs) {
+        (&mut self.spi, &mut self.cs)
+    }
+}
+
+/// Trait for providing SPI device and CS pin on demand.
+/// The SPI device is created when needed and the pins are released (set back to input)
+/// when the returned guard is dropped.
+pub trait SpiDeviceProvider {
+    type Guard<'a>: SpiCsGuard
+    where
+        Self: 'a;
+
+    /// Acquire the SPI device and CS pin. The pins should be configured as outputs.
+    /// When the returned guard is dropped, the pins should be set back to input mode.
+    ///
+    /// # Arguments
+    /// * `freq_hz` - The requested SPI clock frequency in Hz.
+    fn acquire(&mut self, freq_hz: u32) -> Self::Guard<'_>;
+}
+
+/// Trait for providing an LED indicator
+pub trait LedProvider {
+    type Led: OutputPin;
+
+    fn led(&mut self) -> &mut Self::Led;
+}
+
+/// Blanket implementation of `LedProvider` for any `OutputPin`.
+/// This allows passing an `Output` directly without a wrapper struct.
+impl<L: OutputPin> LedProvider for L {
+    type Led = L;
+
+    fn led(&mut self) -> &mut Self::Led {
+        self
+    }
 }
 
 async fn ospiop_usb_task<T: Transport<TRANSFER_SIZE>, const TRANSFER_SIZE: usize>(
@@ -306,259 +369,261 @@ async fn ospiop_spi_task<SPI: SpiBus<u8>, CS: OutputPin, const TRANSFER_SIZE: us
     Ok(())
 }
 
-impl<SPI, CS, LED, T, F, const TRANSFER_SIZE: usize> Serprog<SPI, CS, LED, T, F, TRANSFER_SIZE>
+/// Default SPI frequency in Hz (12 MHz)
+const DEFAULT_SPI_FREQ_HZ: u32 = 12_000_000;
+
+/// Main serprog loop that handles commands from the transport.
+///
+/// This function runs indefinitely, processing serprog commands.
+/// SPI pins are only configured as outputs during actual SPI operations
+/// and are released (via the SpiDeviceProvider's Drop impl) after each operation.
+pub async fn run_loop<S, L, T, const TRANSFER_SIZE: usize>(
+    mut spi_provider: S,
+    mut led_provider: L,
+    mut transport: T,
+) -> !
 where
-    SPI: SpiBus<u8>,
-    CS: OutputPin,
-    LED: OutputPin,
+    S: SpiDeviceProvider,
+    L: LedProvider,
     T: Transport<TRANSFER_SIZE>,
-    F: FnMut(&mut SPI, u32) + Send + Sync,
 {
-    pub fn new(spi: SPI, cs: CS, led: LED, transport: T, freq_callback: Option<F>) -> Self {
-        Self {
-            spi,
-            cs,
-            led,
-            transport,
-            freq_callback,
+    let mut buf = [0; 1];
+    let mut spi_freq_hz = DEFAULT_SPI_FREQ_HZ;
+
+    loop {
+        if transport.read(&mut buf).await.is_err() {
+            error!("Read error in main loop");
+            continue;
+        }
+
+        let cmd = SerprogCommand::try_from(buf[0]).unwrap_or(SerprogCommand::Nop);
+        if let Err(e) = handle_command::<_, _, _, TRANSFER_SIZE>(
+            &mut spi_provider,
+            &mut led_provider,
+            &mut transport,
+            cmd,
+            &mut spi_freq_hz,
+        )
+        .await
+        {
+            error!("Command error: {:?}", e);
         }
     }
+}
 
-    pub async fn run_loop(mut self) -> !
-    where
-        CS::Error: core::fmt::Debug,
-        LED::Error: core::fmt::Debug,
-    {
-        let mut buf = [0; 1];
-
-        loop {
-            if self.transport.read(&mut buf).await.is_err() {
-                error!("Read error in main loop");
-                continue;
-            }
-
-            let cmd = SerprogCommand::try_from(buf[0]).unwrap_or(SerprogCommand::Nop);
-            if let Err(e) = self.handle_command(cmd).await {
-                error!("Command error: {:?}", e);
-            }
+async fn handle_command<S, L, T, const TRANSFER_SIZE: usize>(
+    spi_provider: &mut S,
+    led_provider: &mut L,
+    transport: &mut T,
+    cmd: SerprogCommand,
+    spi_freq_hz: &mut u32,
+) -> Result<(), SerprogError>
+where
+    S: SpiDeviceProvider,
+    L: LedProvider,
+    T: Transport<TRANSFER_SIZE>,
+{
+    match cmd {
+        SerprogCommand::Nop => {
+            debug!("Received Nop CMD");
+            transport
+                .write(&[S_ACK])
+                .await
+                .map_err(|_| SerprogError::TransportWrite("Error writing ACK"))?;
+            Ok(())
         }
-    }
-
-    async fn handle_command(&mut self, cmd: SerprogCommand) -> Result<(), SerprogError>
-    where
-        CS::Error: core::fmt::Debug,
-        LED::Error: core::fmt::Debug,
-    {
-        match cmd {
-            SerprogCommand::Nop => {
-                debug!("Received Nop CMD");
-                self.transport
+        SerprogCommand::QIface => {
+            debug!("Received QIface CMD");
+            let response = QIfaceResponse {
+                ack: S_ACK,
+                version: U16::new(1),
+            };
+            transport
+                .write(response.as_bytes())
+                .await
+                .map_err(|_| SerprogError::TransportWrite("Error writing QIface response"))?;
+            Ok(())
+        }
+        SerprogCommand::QCmdMap => {
+            debug!("Received QCmdMap CMD");
+            let response = QCmdMapResponse::new();
+            transport
+                .write(response.as_bytes())
+                .await
+                .map_err(|_| SerprogError::TransportWrite("Error writing QCmdMap response"))?;
+            Ok(())
+        }
+        SerprogCommand::QPgmName => {
+            debug!("Received QPgmName CMD");
+            let response = QPgmNameResponse::new("Picoprog");
+            transport
+                .write(response.as_bytes())
+                .await
+                .map_err(|_| SerprogError::TransportWrite("Error writing QPgmName response"))?;
+            Ok(())
+        }
+        SerprogCommand::QSerBuf => {
+            debug!("Received QSerBuf CMD");
+            transport
+                .write(&[S_ACK, 0xFF, 0xFF])
+                .await
+                .map_err(|_| SerprogError::TransportWrite("Error writing QSerBuf response"))?;
+            Ok(())
+        }
+        SerprogCommand::QWrNMaxLen | SerprogCommand::QRdNMaxLen => {
+            debug!("Received QWrNMaxLen/QRdNMaxLen CMD");
+            let response = QMaxLenResponse::new(MAX_BUFFER_SIZE);
+            transport
+                .write(response.as_bytes())
+                .await
+                .map_err(|_| SerprogError::TransportWrite("Error writing QMaxLen response"))?;
+            Ok(())
+        }
+        SerprogCommand::QBustype => {
+            debug!("Received QBustype CMD");
+            transport
+                .write(&[S_ACK, 0x08])
+                .await
+                .map_err(|_| SerprogError::TransportWrite("Error writing QBustype response"))?;
+            Ok(())
+        }
+        SerprogCommand::SyncNop => {
+            debug!("Received SyncNop CMD");
+            transport
+                .write(&[S_NAK, S_ACK])
+                .await
+                .map_err(|_| SerprogError::TransportWrite("Error writing SyncNop response"))?;
+            Ok(())
+        }
+        SerprogCommand::SBustype => {
+            debug!("Received SBustype CMD");
+            let mut buf = [0u8; 1];
+            transport
+                .read(&mut buf)
+                .await
+                .map_err(|_| SerprogError::TransportRead("Error reading SBustype data"))?;
+            if buf[0] == 0x08 {
+                debug!("Received SBustype 'SPI'");
+                transport
                     .write(&[S_ACK])
                     .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing ACK"))?;
-                Ok(())
-            }
-            SerprogCommand::QIface => {
-                debug!("Received QIface CMD");
-                let response = QIfaceResponse {
-                    ack: S_ACK,
-                    version: U16::new(1),
-                };
-                self.transport
-                    .write(response.as_bytes())
+                    .map_err(|_| SerprogError::TransportWrite("Error writing SBustype ACK"))?;
+            } else {
+                debug!("Received unknown SBustype");
+                transport
+                    .write(&[S_NAK])
                     .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing QIface response"))?;
-                Ok(())
+                    .map_err(|_| SerprogError::TransportWrite("Error writing SBustype NAK"))?;
             }
-            SerprogCommand::QCmdMap => {
-                debug!("Received QCmdMap CMD");
-                let response = QCmdMapResponse::new(self.freq_callback.is_some());
-                self.transport
-                    .write(response.as_bytes())
+            Ok(())
+        }
+        SerprogCommand::OSpiOp => {
+            debug!("Received OSpiOp CMD");
+
+            // Read directly into the first channel buffer
+            let mut usb_rx_spi_tx_buf = [const { Vec::<u8, TRANSFER_SIZE>::new() }; 4];
+            usb_rx_spi_tx_buf[0]
+                .resize(TRANSFER_SIZE, 0)
+                .map_err(|_| SerprogError::TransportRead("Error resizing OSpiOp buffer"))?;
+            transport
+                .read(usb_rx_spi_tx_buf[0].as_mut_slice())
+                .await
+                .map_err(|_| SerprogError::TransportRead("Error reading OSpiOp data"))?;
+
+            // Parse header from the first buffer
+            let op_slen = le_u24_to_u32(&usb_rx_spi_tx_buf[0][0..3]) as usize;
+            let op_rlen = le_u24_to_u32(&usb_rx_spi_tx_buf[0][3..6]) as usize;
+
+            let mut usb_rx_spi_tx_channel: Channel<'_, NoopRawMutex, Vec<u8, TRANSFER_SIZE>> =
+                Channel::new(&mut usb_rx_spi_tx_buf);
+            let (usb_rx, spi_tx) = usb_rx_spi_tx_channel.split();
+
+            let mut usb_tx_spi_rx_buf = [const { Vec::<u8, TRANSFER_SIZE>::new() }; 8];
+            let mut usb_tx_spi_rx_channel: Channel<'_, NoopRawMutex, Vec<u8, TRANSFER_SIZE>> =
+                Channel::new(&mut usb_tx_spi_rx_buf);
+            let (spi_rx, usb_tx) = usb_tx_spi_rx_channel.split();
+
+            // Acquire SPI device - pins are set to output mode
+            // When guard is dropped, pins will be set back to input mode
+            let mut spi_guard = spi_provider.acquire(*spi_freq_hz);
+            let (spi, cs) = spi_guard.spi_cs();
+
+            let (spi_res, usb_res) = block_on(join(
+                ospiop_spi_task::<_, _, TRANSFER_SIZE>(spi, spi_tx, op_slen, spi_rx, op_rlen, cs),
+                ospiop_usb_task::<_, TRANSFER_SIZE>(transport, usb_rx, op_slen, usb_tx, op_rlen),
+            ));
+
+            // Guard is dropped here, releasing the SPI pins back to input mode
+            drop(spi_guard);
+
+            if let Err(spi_err) = spi_res {
+                transport
+                    .write(&[S_NAK])
                     .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing QCmdMap response"))?;
-                Ok(())
+                    .map_err(|_| SerprogError::TransportWrite("Failed to report SPI failed"))?;
+                return Err(spi_err);
             }
-            SerprogCommand::QPgmName => {
-                debug!("Received QPgmName CMD");
-                let response = QPgmNameResponse::new("Picoprog");
-                self.transport
-                    .write(response.as_bytes())
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing QPgmName response"))?;
-                Ok(())
+            usb_res?;
+
+            Ok(())
+        }
+        SerprogCommand::SSpiFreq => {
+            debug!("Received SSpiFreq CMD");
+            let mut request = SSpiFreqRequest::new_zeroed();
+            transport
+                .read(request.as_mut_bytes())
+                .await
+                .map_err(|_| SerprogError::TransportRead("Error reading SSpiFreq data"))?;
+
+            // Store the requested frequency for use when acquiring SPI
+            let requested_freq = request.freq.get();
+            *spi_freq_hz = requested_freq;
+
+            debug!("Setting SPI frequency: {:?}", requested_freq);
+
+            // Create and send response
+            let response = SSpiFreqResponse {
+                ack: S_ACK,
+                freq: U32::new(requested_freq),
+            };
+
+            transport
+                .write(response.as_bytes())
+                .await
+                .map_err(|_| SerprogError::TransportWrite("Error writing SSpiFreq response"))?;
+
+            Ok(())
+        }
+        SerprogCommand::SPinState => {
+            debug!("Received SPinState CMD");
+            let mut buf = [0u8; 1];
+            transport
+                .read(&mut buf)
+                .await
+                .map_err(|_| SerprogError::TransportRead("Error reading SPinState data"))?;
+            let led = led_provider.led();
+            if buf[0] == 0 {
+                led.set_low()
+                    .map_err(|_| SerprogError::LedSetLow("Error setting LED low"))?;
+            } else {
+                led.set_high()
+                    .map_err(|_| SerprogError::LedSetHigh("Error setting LED high"))?;
             }
-            SerprogCommand::QSerBuf => {
-                debug!("Received QSerBuf CMD");
-                self.transport
-                    .write(&[S_ACK, 0xFF, 0xFF])
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing QSerBuf response"))?;
-                Ok(())
-            }
-            SerprogCommand::QWrNMaxLen | SerprogCommand::QRdNMaxLen => {
-                debug!("Received QWrNMaxLen/QRdNMaxLen CMD");
-                let response = QMaxLenResponse::new(MAX_BUFFER_SIZE);
-                self.transport
-                    .write(response.as_bytes())
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing QMaxLen response"))?;
-                Ok(())
-            }
-            SerprogCommand::QBustype => {
-                debug!("Received QBustype CMD");
-                self.transport
-                    .write(&[S_ACK, 0x08])
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing QBustype response"))?;
-                Ok(())
-            }
-            SerprogCommand::SyncNop => {
-                debug!("Received SyncNop CMD");
-                self.transport
-                    .write(&[S_NAK, S_ACK])
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing SyncNop response"))?;
-                Ok(())
-            }
-            SerprogCommand::SBustype => {
-                debug!("Received SBustype CMD");
-                let mut buf = [0u8; 1];
-                self.transport
-                    .read(&mut buf)
-                    .await
-                    .map_err(|_| SerprogError::TransportRead("Error reading SBustype data"))?;
-                if buf[0] == 0x08 {
-                    debug!("Received SBustype 'SPI'");
-                    self.transport
-                        .write(&[S_ACK])
-                        .await
-                        .map_err(|_| SerprogError::TransportWrite("Error writing SBustype ACK"))?;
-                } else {
-                    debug!("Received unknown SBustype");
-                    self.transport
-                        .write(&[S_NAK])
-                        .await
-                        .map_err(|_| SerprogError::TransportWrite("Error writing SBustype NAK"))?;
-                }
-                Ok(())
-            }
-            SerprogCommand::OSpiOp => {
-                debug!("Received OSpiOp CMD");
+            transport
+                .write(&[S_ACK])
+                .await
+                .map_err(|_| SerprogError::TransportWrite("Error writing SPinState ACK"))?;
 
-                // Read directly into the first channel buffer
-                let mut usb_rx_spi_tx_buf = [const { Vec::<u8, TRANSFER_SIZE>::new() }; 4];
-                usb_rx_spi_tx_buf[0]
-                    .resize(TRANSFER_SIZE, 0)
-                    .map_err(|_| SerprogError::TransportRead("Error resizing OSpiOp buffer"))?;
-                self.transport
-                    .read(usb_rx_spi_tx_buf[0].as_mut_slice())
-                    .await
-                    .map_err(|_| SerprogError::TransportRead("Error reading OSpiOp data"))?;
+            Ok(())
+        }
+        _ => {
+            debug!("Received unknown CMD");
+            transport
+                .write(&[S_NAK])
+                .await
+                .map_err(|_| SerprogError::TransportWrite("Error writing unknown command NAK"))?;
 
-                // Parse header from the first buffer
-                let op_slen = le_u24_to_u32(&usb_rx_spi_tx_buf[0][0..3]) as usize;
-                let op_rlen = le_u24_to_u32(&usb_rx_spi_tx_buf[0][3..6]) as usize;
-
-                let mut usb_rx_spi_tx_channel: Channel<'_, NoopRawMutex, Vec<u8, TRANSFER_SIZE>> =
-                    Channel::new(&mut usb_rx_spi_tx_buf);
-                let (usb_rx, spi_tx) = usb_rx_spi_tx_channel.split();
-
-                let mut usb_tx_spi_rx_buf = [const { Vec::<u8, TRANSFER_SIZE>::new() }; 8];
-                let mut usb_tx_spi_rx_channel: Channel<'_, NoopRawMutex, Vec<u8, TRANSFER_SIZE>> =
-                    Channel::new(&mut usb_tx_spi_rx_buf);
-                let (spi_rx, usb_tx) = usb_tx_spi_rx_channel.split();
-
-                let (spi_res, usb_res) = block_on(join(
-                    ospiop_spi_task::<_, _, TRANSFER_SIZE>(
-                        &mut self.spi,
-                        spi_tx,
-                        op_slen,
-                        spi_rx,
-                        op_rlen,
-                        &mut self.cs,
-                    ),
-                    ospiop_usb_task::<_, TRANSFER_SIZE>(
-                        &mut self.transport,
-                        usb_rx,
-                        op_slen,
-                        usb_tx,
-                        op_rlen,
-                    ),
-                ));
-                if let Err(spi_err) = spi_res {
-                    self.transport
-                        .write(&[S_NAK])
-                        .await
-                        .map_err(|_| SerprogError::TransportWrite("Failed to report SPI failed"))?;
-                    return Err(spi_err);
-                }
-                usb_res?;
-
-                Ok(())
-            }
-            SerprogCommand::SSpiFreq => {
-                debug!("Received SSpiFreq CMD");
-                let mut request = SSpiFreqRequest::new_zeroed();
-                self.transport
-                    .read(request.as_mut_bytes())
-                    .await
-                    .map_err(|_| SerprogError::TransportRead("Error reading SSpiFreq data"))?;
-
-                // Parse the request using zerocopy
-                let try_freq = request.freq.get();
-
-                debug!("Setting SPI frequency: {:?}", try_freq);
-
-                // Call the frequency callback if set
-                if let Some(callback) = &mut self.freq_callback {
-                    (callback)(&mut self.spi, try_freq);
-                }
-
-                // Create and send response
-                let response = SSpiFreqResponse {
-                    ack: S_ACK,
-                    freq: U32::new(try_freq), // TODO can we report what the hardware has set up?
-                };
-
-                self.transport
-                    .write(response.as_bytes())
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing SSpiFreq response"))?;
-
-                Ok(())
-            }
-            SerprogCommand::SPinState => {
-                debug!("Received SPinState CMD");
-                let mut buf = [0u8; 1];
-                self.transport
-                    .read(&mut buf)
-                    .await
-                    .map_err(|_| SerprogError::TransportRead("Error reading SPinState data"))?;
-                if buf[0] == 0 {
-                    self.led
-                        .set_low()
-                        .map_err(|_| SerprogError::LedSetLow("Error setting LED low"))?;
-                } else {
-                    self.led
-                        .set_high()
-                        .map_err(|_| SerprogError::LedSetHigh("Error setting LED high"))?;
-                }
-                self.transport
-                    .write(&[S_ACK])
-                    .await
-                    .map_err(|_| SerprogError::TransportWrite("Error writing SPinState ACK"))?;
-
-                Ok(())
-            }
-            _ => {
-                debug!("Received unknown CMD");
-                self.transport.write(&[S_NAK]).await.map_err(|_| {
-                    SerprogError::TransportWrite("Error writing unknown command NAK")
-                })?;
-
-                Ok(())
-            }
+            Ok(())
         }
     }
 }
